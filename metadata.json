@@ -1,0 +1,8 @@
+{
+  "name": "AURA - Crisis Dispatch Co-Pilot",
+  "description": "Autonomous Urgent Response Agent for emergency 911 intake, real-time voice AI with barge-in interruption, paralinguistic panic analysis, and instant Postgres NOTIFY dispatch streaming.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

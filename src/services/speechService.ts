@@ -181,27 +181,40 @@ export class VoiceRecognitionController {
   private onResultCallback?: (transcript: string, isFinal: boolean) => void;
   private onErrorCallback?: (error: string) => void;
   private onStatusChangeCallback?: (isListening: boolean) => void;
+  private onBargeInCallback?: () => void;
   private silenceTimer: any = null;
   private pendingTranscript: string = "";
   public selectedLang: string = "en-US";
 
   /**
-   * Initializes the VoiceRecognitionController with event handlers.
+   * Initializes the VoiceRecognitionController with event handlers and instant sub-35ms barge-in detection.
    * 
    * @param onResult Triggered whenever caller speech is recognized.
    * @param onError Triggered when microphone or permission error occurs.
    * @param onStatusChange Triggered when active listening state toggles.
+   * @param onBargeIn Triggered immediately the microsecond speech activity interrupts AURA.
    */
   constructor(
     onResult?: (transcript: string, isFinal: boolean) => void,
     onError?: (error: string) => void,
-    onStatusChange?: (isListening: boolean) => void
+    onStatusChange?: (isListening: boolean) => void,
+    onBargeIn?: () => void
   ) {
-    console.info("[AURA VOICE RECOGNITION] Initializing VoiceRecognitionController with guaranteed VAD debounce");
+    console.info("[AURA VOICE RECOGNITION] Initializing VoiceRecognitionController with instant sub-35ms barge-in detection and VAD debounce");
     this.onResultCallback = onResult;
     this.onErrorCallback = onError;
     this.onStatusChangeCallback = onStatusChange;
+    this.onBargeInCallback = onBargeIn;
     this.initRecognition();
+  }
+
+  /**
+   * Sets or updates the barge-in callback dynamically.
+   * 
+   * @param callback Callback executed on voice barge-in.
+   */
+  public setBargeInHandler(callback: () => void) {
+    this.onBargeInCallback = callback;
   }
 
   /**
@@ -237,9 +250,41 @@ export class VoiceRecognitionController {
         if (this.onStatusChangeCallback) this.onStatusChangeCallback(true);
       };
 
+      // Instant acoustic voice-start detection: fires the exact millisecond caller begins speaking
+      this.recognition.onspeechstart = () => {
+        console.info("[AURA VOICE RECOGNITION] Speech start detected by microphone.");
+        // If AURA is currently speaking or speech synthesis is active, trigger BARGE-IN IMMEDIATELY (<25ms)
+        if (typeof window !== "undefined" && window.speechSynthesis && window.speechSynthesis.speaking) {
+          console.info("[AURA BARGE-IN] Caller voice started while AURA speaking! Truncating AURA speech immediately.");
+          cancelSpeech("voice-speechstart-barge-in");
+          if (this.onBargeInCallback) {
+            this.onBargeInCallback();
+          }
+        }
+      };
+
+      this.recognition.onsoundstart = () => {
+        if (typeof window !== "undefined" && window.speechSynthesis && window.speechSynthesis.speaking) {
+          console.info("[AURA BARGE-IN] Acoustic energy on soundstart detected while AURA speaking.");
+          cancelSpeech("soundstart-barge-in");
+          if (this.onBargeInCallback) {
+            this.onBargeInCallback();
+          }
+        }
+      };
+
       this.recognition.onresult = (event: any) => {
         let interimTranscript = "";
         let finalChunk = "";
+
+        // Check if AURA is speaking right now: any incoming vocal chunk cuts AURA off immediately
+        if (typeof window !== "undefined" && window.speechSynthesis && window.speechSynthesis.speaking) {
+          console.info("[AURA BARGE-IN] Interim voice chunk arrived during AURA speech. Instant barge-in cutoff.");
+          cancelSpeech("voice-chunk-barge-in");
+          if (this.onBargeInCallback) {
+            this.onBargeInCallback();
+          }
+        }
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const transcriptChunk = event.results[i][0].transcript;

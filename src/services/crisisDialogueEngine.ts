@@ -37,6 +37,8 @@ export interface DialogueProcessingInput {
   existingIncidentType?: string;
   existingCasualties?: number;
   isBargeIn?: boolean;
+  sessionId?: string;
+  callId?: string;
 }
 
 export interface MultiSpeakerTurn {
@@ -70,6 +72,13 @@ export interface DialogueProcessingResult {
   breathingCadence: string;
   recommendedUnits: string[];
   tacticalActionSummary: string;
+  sessionId?: string;
+  sessionTokenCount?: number;
+  summarization?: {
+    triggered: boolean;
+    summaryText?: string;
+    reason?: string;
+  };
   toolFired: {
     toolName: string;
     arguments: {
@@ -421,6 +430,8 @@ export async function processCallerUtteranceOnline(
         utterance: input.callerUtterance,
         history: input.history,
         is_barge_in: input.isBargeIn,
+        session_id: input.sessionId,
+        call_id: input.callId,
         tone_metrics: {
           panic_index: input.currentPanicIndex || 7,
           is_barge_in: input.isBargeIn
@@ -467,6 +478,9 @@ export async function processCallerUtteranceOnline(
         breathingCadence: data.vocal_tone?.breathing_rate || "Hyperventilating (36 BPM)",
         recommendedUnits: recommendedUnits,
         tacticalActionSummary: data.tactical_action_summary || "Deploy nearest rescue squad.",
+        sessionId: json.session_id || input.sessionId,
+        sessionTokenCount: json.session_token_count,
+        summarization: json.summarization,
         toolFired: {
           toolName: "extract_dispatch_data",
           arguments: {

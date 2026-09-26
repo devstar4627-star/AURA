@@ -44,6 +44,18 @@ export interface AuraSystemConfig {
     recentIncidents: string;
     manualDispatch: string;
     chatIntake: string;
+    memorySessionStart: string;
+    memorySessions: string;
+    memorySessionDetail: string;
+    memoryAddTurn: string;
+    memorySummarize: string;
+  };
+  memory: {
+    dbFilePath: string;
+    contextTokenLimit: number; // 20,000 tokens default summarization threshold
+    recentTurnsToKeepAfterSummarization: number;
+    testSummarizeThreshold: number; // Option to test summarization with smaller token threshold
+    avgCharsPerToken: number;
   };
   telemetry: {
     targetNotifyLatencyMs: number;
@@ -82,6 +94,18 @@ export const AURA_CONFIG: AuraSystemConfig = {
     recentIncidents: "/api/incidents",
     manualDispatch: "/api/dispatch",
     chatIntake: "/api/chat/intake",
+    memorySessionStart: "/api/memory/session/start",
+    memorySessions: "/api/memory/sessions",
+    memorySessionDetail: "/api/memory/session",
+    memoryAddTurn: "/api/memory/turn",
+    memorySummarize: "/api/memory/summarize",
+  },
+  memory: {
+    dbFilePath: "./db/aura_memory.sqlite",
+    contextTokenLimit: 20000, // 20K tokens summarization middleware trigger
+    recentTurnsToKeepAfterSummarization: 6,
+    testSummarizeThreshold: 800, // Allows testing summarization behavior quickly in UI
+    avgCharsPerToken: 4,
   },
   telemetry: {
     targetNotifyLatencyMs: 1.2,

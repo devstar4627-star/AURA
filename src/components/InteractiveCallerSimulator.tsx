@@ -62,6 +62,14 @@ import {
   DialogueProcessingResult,
   MultiSpeakerTurn
 } from "../services/crisisDialogueEngine";
+import { DispatchChatSession } from "./DispatchChatSession";
+import {
+  startNewCallSession,
+  triggerSessionSummarization,
+  fetchSessionDetails,
+  SqlSessionData,
+  SqlSummaryData
+} from "../services/sqlMemoryService";
 
 export interface InteractiveCallerSimulatorProps {
   onDispatchReportFired: (report: any) => void;
@@ -152,6 +160,11 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
   const [currentIncidentType, setCurrentIncidentType] = useState("");
   const [currentCasualties, setCurrentCasualties] = useState(0);
 
+  // Persistent SQL Memory & Summarization Middleware State
+  const [sessionData, setSessionData] = useState<SqlSessionData | null>(null);
+  const [activeSummary, setActiveSummary] = useState<string | null>(null);
+  const [summariesHistory, setSummariesHistory] = useState<SqlSummaryData[]>([]);
+
   // Active Real-Time Triage & Metrics Feedback State
   const [activeTriage, setActiveTriage] = useState<ActiveTriageFeedback | null>(null);
   const [isAiThinking, setIsAiThinking] = useState(false);
@@ -212,13 +225,22 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
     setCurrentIncidentType("");
     setCurrentCasualties(0);
     setPanicIndex(8);
+    setActiveSummary(null);
+
+    // Treat new call as an isolated session in persistent SQL memory
+    startNewCallSession(newCallId, "English", "en").then((session) => {
+      setSessionData(session);
+      console.info(`[CALL SIMULATOR] Initialized new persistent SQL session: ${session.session_id}`);
+    }).catch((err) => {
+      console.warn("[CALL SIMULATOR] Error creating SQL session:", err);
+    });
 
     const initialGreeting = "AURA 911 emergency dispatch. I am on the line with you. What is your exact address and what is happening?";
 
     const initialTurns: DialogueTurn[] = [
       {
         speaker: "SYSTEM",
-        text: `[CALL CONNECTED] ${newCallId} • Full-Duplex Audio Engine Ready (gemini-3.8-live). Speak into your mic or choose a crisis scenario below.`
+        text: `[CALL CONNECTED] ${newCallId} • Full-Duplex Audio Engine Ready (gemini-3.8-live). Backed by persistent SQL short-term memory.`
       },
       {
         speaker: "AURA",
@@ -288,8 +310,20 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
         },
         (listening) => {
           setIsMicListening(listening);
+        },
+        () => {
+          // Instant acoustic voice-start / speech detected while AI speaking -> immediate barge-in!
+          if (isAiSpeaking) {
+            handleBargeInCutoff();
+          }
         }
       );
+    } else {
+      voiceRecognitionRef.current.setBargeInHandler(() => {
+        if (isAiSpeaking) {
+          handleBargeInCutoff();
+        }
+      });
     }
 
     voiceRecognitionRef.current.setLanguage(micLang);
@@ -304,7 +338,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
    */
   const handleBargeInCutoff = () => {
     console.info("[CALL SIMULATOR] handleBargeInCutoff executing.");
-    cancelSpeech("user-barge-in-button");
+    cancelSpeech("user-barge-in-interruption");
     speechAudioFX.playBargeInClick();
     setIsAiSpeaking(false);
     setBargeInTriggered(true);
@@ -316,7 +350,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       ...prev,
       {
         speaker: "SYSTEM",
-        text: `[BARGE-IN TRIGGERED] Caller shriek / interruption detected in <38ms. AURA audio stream truncated. Live intake buffer opened.`,
+        text: `⚡ [BARGE-IN / INTERRUPTION TRIGGERED] Caller voice asserted priority (<30ms cutoff). AURA audio stream truncated. Live intake buffer active.`,
         isBargeIn: true
       }
     ]);
@@ -325,6 +359,39 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       setBargeInTriggered(false);
       setScreamingActive(false);
     }, 3500);
+  };
+
+  /**
+   * Manually / test-triggers the 20K Token Summarization Middleware.
+   */
+  const handleTriggerTestSummarization = async () => {
+    if (!sessionData?.session_id) {
+      console.warn("No active session to summarize");
+      return;
+    }
+    console.info(`[CALL SIMULATOR] Triggering test summarization for session: ${sessionData.session_id}`);
+    speechAudioFX.playRadioChirp();
+    const res = await triggerSessionSummarization(sessionData.session_id, true);
+    if (res.result?.summaryText) {
+      setActiveSummary(res.result.summaryText);
+      setSessionData((prev) =>
+        prev
+          ? {
+              ...prev,
+              token_count: res.result.newTokenCount,
+              is_summarized: 1,
+              summary: res.result.summaryText
+            }
+          : null
+      );
+      setDialogue((prev) => [
+        ...prev,
+        {
+          speaker: "SYSTEM",
+          text: `🧠 [20K SUMMARIZATION MIDDLEWARE] Manual/Test trigger completed. Context compressed to ${res.result.newTokenCount} tokens in SQL memory.`
+        }
+      ]);
+    }
   };
 
   /**
@@ -354,7 +421,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
     setIsAiThinking(true);
 
     try {
-      // Process through Gemini 3.8 Flash Online Multilingual Engine
+      // Process through Gemini 3.8 Flash Online Multilingual Engine with SQL Session tracking
       const result: DialogueProcessingResult = await processCallerUtteranceOnline({
         callerUtterance: text,
         history: [...dialogue, callerTurn],
@@ -362,7 +429,9 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
         existingLocation: currentLocation,
         existingIncidentType: currentIncidentType,
         existingCasualties: currentCasualties,
-        isBargeIn: bargeInTriggered
+        isBargeIn: bargeInTriggered,
+        sessionId: sessionData?.session_id,
+        callId: callId
       });
 
       setIsAiThinking(false);
@@ -374,6 +443,22 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       if (result.extractedLocation) setCurrentLocation(result.extractedLocation);
       if (result.extractedIncidentType) setCurrentIncidentType(result.extractedIncidentType);
       if (result.extractedCasualties > 0) setCurrentCasualties(result.extractedCasualties);
+
+      if (result.sessionTokenCount !== undefined) {
+        setSessionData((prev) =>
+          prev ? { ...prev, token_count: result.sessionTokenCount || prev.token_count } : null
+        );
+      }
+      if (result.summarization?.triggered && result.summarization.summaryText) {
+        setActiveSummary(result.summarization.summaryText);
+        setDialogue((prev) => [
+          ...prev,
+          {
+            speaker: "SYSTEM",
+            text: `🧠 [20K TOKEN SUMMARIZATION MIDDLEWARE TRIGGERED] Context reached 20,000 tokens. Executive incident summary generated and synchronized into SQL memory.`
+          }
+        ]);
+      }
 
       // Formulate and set real-time triage feedback immediately on screen
       const triage: ActiveTriageFeedback = {
@@ -867,75 +952,24 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
         </div>
       )}
 
-      {/* Live AI Processing Indicator */}
-      {isAiThinking && (
-        <div className="px-4 py-2.5 bg-neutral-900 border-b border-red-500/40 flex items-center gap-3 text-xs font-mono text-neutral-200 animate-pulse">
-          <Loader2 className="w-4 h-4 text-red-500 animate-spin flex-shrink-0" />
-          <div className="flex-1">
-            <span className="font-bold text-red-400">AURA Gemini 3.8 Flash Engine Processing:</span>
-            <span className="text-neutral-300 ml-1.5">Analyzing vocal tone, recognizing intent, separating multi-speaker audio, and translating in real time...</span>
-          </div>
-        </div>
-      )}
-
-      {/* Live Turn-Taking Transcript Stream */}
-      <div
-        ref={scrollRef}
-        className="p-4 bg-neutral-950/90 flex-1 min-h-[200px] max-h-[280px] overflow-y-auto space-y-2 font-mono text-xs border-b border-neutral-800"
-      >
-        {dialogue.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500 space-y-2">
-            <Radio className="w-8 h-8 text-neutral-600 animate-pulse" />
-            <p className="text-xs">No active call session. Click "SIMULATE 911 INTAKE CALL" above or select any crisis scenario below to speak with AURA.</p>
-          </div>
-        ) : (
-          dialogue.map((turn, idx) => {
-            const isAura = turn.speaker === "AURA";
-            const isCaller = turn.speaker === "CALLER";
-            return (
-              <div
-                key={idx}
-                className={`p-2.5 rounded-xl border flex items-start gap-2.5 transition-all ${
-                  isAura
-                    ? "bg-blue-950/30 border-blue-500/40 text-blue-100"
-                    : isCaller
-                    ? "bg-red-950/30 border-red-500/40 text-red-100"
-                    : "bg-neutral-900/70 border-neutral-800 text-cyan-300 text-[11px]"
-                }`}
-              >
-                <div
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider uppercase flex-shrink-0 ${
-                    isAura
-                      ? "bg-blue-500/20 text-blue-300"
-                      : isCaller
-                      ? "bg-red-500/20 text-red-300"
-                      : "bg-neutral-800 text-neutral-400"
-                  }`}
-                >
-                  {turn.speaker}
-                </div>
-                <div className="flex-1 leading-relaxed whitespace-pre-line">{turn.text}</div>
-                {isAura && (
-                  <button
-                    onClick={() => speakAura(turn.text, activeTriage?.callerLanguageCode || "en")}
-                    title="Replay AURA spoken vocal response in detected language"
-                    className="p-1 rounded bg-blue-900/40 hover:bg-blue-800 text-blue-300 transition-colors flex-shrink-0"
-                  >
-                    <Volume2 className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            );
-          })
-        )}
-
-        {/* Interim voice recognition stream preview */}
-        {interimVoiceText && (
-          <div className="p-2 rounded-xl bg-neutral-900 border border-emerald-500/40 text-emerald-300 italic flex items-center gap-2 animate-pulse">
-            <Mic className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
-            <span>Hearing you: "{interimVoiceText}"...</span>
-          </div>
-        )}
+      {/* Two-Way Emergency Intake Chat Session with SQL Memory & Live User Input */}
+      <div className="p-4 bg-neutral-950/60 border-b border-neutral-800">
+        <DispatchChatSession
+          dialogue={dialogue}
+          isAiSpeaking={isAiSpeaking}
+          isAiThinking={isAiThinking}
+          interimVoiceText={interimVoiceText}
+          isMicListening={isMicListening}
+          bargeInTriggered={bargeInTriggered}
+          bargeInCount={bargeInCount}
+          sessionData={sessionData}
+          activeSummary={activeSummary}
+          summariesHistory={summariesHistory}
+          onBargeInCutoff={handleBargeInCutoff}
+          onReplaySpeech={(text) => speakAura(text, activeTriage?.callerLanguageCode || "en")}
+          onTriggerTestSummarization={handleTriggerTestSummarization}
+          contextTokenLimit={AURA_CONFIG.memory.contextTokenLimit}
+        />
       </div>
 
       {/* Mic Error / Note Notification */}
@@ -1032,20 +1066,31 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
               type="text"
               placeholder={
                 isCallActive
-                  ? "Speak into mic or type your emergency message here..."
+                  ? isAiSpeaking
+                    ? "AURA is speaking... type to barge-in & interrupt, or enter message..."
+                    : "Speak into mic or type your emergency message here..."
                   : "Click 'SIMULATE 911 INTAKE CALL' or type here to start speaking with AURA..."
               }
               value={userInput}
-              onChange={(e) => setUserInput(e.target.value)}
+              onChange={(e) => {
+                setUserInput(e.target.value);
+                // If user starts typing while AI is speaking aloud, trigger instantaneous barge-in!
+                if (isAiSpeaking && e.target.value.trim().length > 0) {
+                  handleBargeInCutoff();
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   const toSend = userInput.trim() || interimVoiceText.trim();
                   if (toSend) {
+                    if (isAiSpeaking) handleBargeInCutoff();
                     if (!isCallActive) handleStartCall();
                     if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
                     setInterimVoiceText("");
-                    setTimeout(() => handleCallerSendUtterance(toSend), 150);
+                    setTimeout(() => handleCallerSendUtterance(toSend), 100);
                   }
+                } else if (e.key === "Escape" && isAiSpeaking) {
+                  handleBargeInCutoff();
                 }
               }}
               className="w-full px-3.5 py-2.5 rounded-xl bg-neutral-950 border border-neutral-800 text-xs font-mono text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-red-500/60 transition-colors"

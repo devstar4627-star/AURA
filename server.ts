@@ -4,6 +4,18 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import {
+  createSession,
+  getSession,
+  listSessions,
+  addMemoryTurn,
+  getSessionTurns,
+  updateSessionMetadata,
+  getLatestSessionByCallId,
+  getSessionSummaries,
+  recordSessionSummary
+} from './server/sqlMemoryDatabase.js';
+import { checkAndExecuteSummarizationMiddleware } from './server/summarizationMiddleware.js';
 
 dotenv.config();
 
@@ -188,12 +200,114 @@ async function createServer() {
     });
   });
 
+  // --- Persistent SQL Memory & Session Management Routes ---
+  
+  // Start / Register a new Call Session (treating each new call as a separate session)
+  app.post('/api/memory/session/start', (req: Request, res: Response) => {
+    const { call_id, caller_language = 'English', caller_language_code = 'en' } = req.body;
+    const sessionCallId = call_id || `CALL-${Math.floor(Math.random() * 90000 + 10000)}`;
+    const session = createSession(sessionCallId, caller_language, caller_language_code);
+    res.status(201).json({ status: 'SUCCESS', session });
+  });
+
+  // List past sessions from SQL memory
+  app.get('/api/memory/sessions', (_req: Request, res: Response) => {
+    const sessions = listSessions(50);
+    res.json({ status: 'SUCCESS', count: sessions.length, sessions });
+  });
+
+  // Get full session detail, turns, and summaries
+  app.get('/api/memory/session/:sessionId', (req: Request, res: Response) => {
+    const { sessionId } = req.params;
+    const session = getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found in SQL memory' });
+    }
+    const turns = getSessionTurns(sessionId);
+    const summaries = getSessionSummaries(sessionId);
+    res.json({ status: 'SUCCESS', session, turns, summaries });
+  });
+
+  // Record an individual turn into SQL memory & run summarization middleware check
+  app.post('/api/memory/turn', async (req: Request, res: Response) => {
+    const { session_id, speaker, text, english_translation, tone_metrics, intent, is_barge_in } = req.body;
+    if (!session_id || !text) {
+      return res.status(400).json({ error: 'session_id and text are required.' });
+    }
+
+    try {
+      const turn = addMemoryTurn({
+        sessionId: session_id,
+        speaker: speaker || 'CALLER',
+        text,
+        englishTranslation: english_translation,
+        toneMetrics: tone_metrics,
+        intent,
+        isBargeIn: Boolean(is_barge_in)
+      });
+
+      // Check if context length reached 20K tokens (or test threshold)
+      const summarization = await checkAndExecuteSummarizationMiddleware(ai, session_id);
+      const updatedSession = getSession(session_id);
+
+      res.status(201).json({
+        status: 'SUCCESS',
+        turn,
+        sessionTokenCount: updatedSession?.token_count || 0,
+        summarization
+      });
+    } catch (err: any) {
+      console.error('[SQL MEMORY API ERROR]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Trigger 20K Token Summarization Middleware manually / test
+  app.post('/api/memory/summarize', async (req: Request, res: Response) => {
+    const { session_id, force = true } = req.body;
+    if (!session_id) {
+      return res.status(400).json({ error: 'session_id is required.' });
+    }
+
+    try {
+      const result = await checkAndExecuteSummarizationMiddleware(ai, session_id, { force });
+      res.json({ status: 'SUCCESS', result });
+    } catch (err: any) {
+      console.error('[SUMMARIZATION MIDDLEWARE API ERROR]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Real-Time Gemini Multilingual Crisis Intake, Multi-Speaker Disentanglement & Tone Reasoning
   app.post('/api/chat/intake', async (req: Request, res: Response) => {
-    const { utterance, history = [], tone_metrics = {}, is_barge_in = false } = req.body;
+    const { utterance, history = [], tone_metrics = {}, is_barge_in = false, session_id, call_id } = req.body;
 
     if (!utterance || typeof utterance !== 'string') {
       return res.status(400).json({ error: 'Utterance is required.' });
+    }
+
+    // Resolve or initialize active session in persistent SQL memory
+    let activeSession = session_id ? getSession(session_id) : null;
+    if (!activeSession && call_id) {
+      activeSession = getLatestSessionByCallId(call_id);
+    }
+    if (!activeSession) {
+      const assignedCallId = call_id || `CALL-${Math.floor(Math.random() * 90000 + 10000)}`;
+      activeSession = createSession(assignedCallId, "English", "en");
+    }
+
+    // Commit incoming caller utterance to short-term SQL memory
+    let callerTurnRecord: any = null;
+    try {
+      callerTurnRecord = addMemoryTurn({
+        sessionId: activeSession.session_id,
+        speaker: "CALLER",
+        text: utterance,
+        toneMetrics: tone_metrics,
+        isBargeIn: Boolean(is_barge_in)
+      });
+    } catch (dbErr) {
+      console.warn("[SQL MEMORY WARNING] Error recording caller turn:", dbErr);
     }
 
     const systemInstruction = `
@@ -283,21 +397,29 @@ Return ONLY a valid JSON object matching this exact structure:
 }
 `;
 
+    const activeExecutiveSummary = activeSession.summary ? `
+PREVIOUS EXECUTIVE INCIDENT SUMMARY (COMPRESSED FROM 20K TOKENS):
+${activeSession.summary}
+` : '';
+
     const prompt = `
+${activeExecutiveSummary}
 CALLER INTAKE UTTERANCE: "${utterance}"
 IS MID-SENTENCE BARGE-IN INTERRUPTION: ${Boolean(is_barge_in)}
 ACOUSTIC TONE TELEMETRY: ${JSON.stringify(tone_metrics)}
 RECENT CONVERSATION TURNS:
-${Array.isArray(history) ? history.slice(-4).map((h: any) => `${h.speaker}: ${h.text}`).join('\n') : ''}
+${Array.isArray(history) ? history.slice(-6).map((h: any) => `${h.speaker}: ${h.text}`).join('\n') : ''}
 
 Analyze and respond in the caller's exact same language and return valid JSON.
 `;
 
     const modelName = 'gemini-3.8-flash';
     console.info(`[GENAI CALL] Model: ${modelName} | Parameters:`, {
+      sessionId: activeSession.session_id,
       utterance: utterance.substring(0, 100),
       is_barge_in,
       tone_metrics,
+      hasSummary: Boolean(activeSession.summary),
       historyLength: Array.isArray(history) ? history.length : 0
     });
 
@@ -324,9 +446,37 @@ Analyze and respond in the caller's exact same language and return valid JSON.
 
       const parsedData = JSON.parse(cleanJson);
 
+      // Record AURA response into SQL short-term memory
+      try {
+        addMemoryTurn({
+          sessionId: activeSession.session_id,
+          speaker: "AURA",
+          text: parsedData.caller_response_same_language || parsedData.caller_response_english,
+          englishTranslation: parsedData.caller_response_english,
+          intent: parsedData.problem_statement
+        });
+
+        // Update session metadata
+        updateSessionMetadata(activeSession.session_id, {
+          caller_language: parsedData.caller_language,
+          caller_language_code: parsedData.caller_language_code,
+          incident_type: parsedData.extracted_data?.incident_type || parsedData.problem_statement,
+          location: parsedData.extracted_data?.location
+        });
+      } catch (dbErr) {
+        console.warn("[SQL MEMORY WARNING] Error recording AURA response turn:", dbErr);
+      }
+
+      // Check if 20K token context threshold reached and trigger summarization middleware
+      const summarization = await checkAndExecuteSummarizationMiddleware(ai, activeSession.session_id);
+      const reloadedSession = getSession(activeSession.session_id);
+
       return res.json({
         status: 'SUCCESS',
         model: modelName,
+        session_id: activeSession.session_id,
+        session_token_count: reloadedSession?.token_count || 0,
+        summarization,
         data: parsedData
       });
     } catch (err: any) {
@@ -344,9 +494,25 @@ Analyze and respond in the caller's exact same language and return valid JSON.
 
       const callerResponse = isSpanish ? fallbackSpanish : isFrench ? fallbackFrench : fallbackEnglish;
 
+      // Record fallback turn in SQL memory
+      try {
+        addMemoryTurn({
+          sessionId: activeSession.session_id,
+          speaker: "AURA",
+          text: callerResponse,
+          englishTranslation: fallbackEnglish,
+          intent: "Resilient Emergency Grounding Directive"
+        });
+      } catch {}
+
+      const reloadedSession = getSession(activeSession.session_id);
+
       return res.json({
         status: 'FALLBACK',
         model: modelName,
+        session_id: activeSession.session_id,
+        session_token_count: reloadedSession?.token_count || 0,
+        summarization: { triggered: false },
         data: {
           caller_language: detectedLang,
           caller_language_code: detectedCode,

@@ -60,14 +60,21 @@ export function cancelSpeech(reason: string = "barge-in"): void {
 }
 
 /**
- * Resolves the best available voice persona (Aoede / Calm female or steady assistant).
+ * Resolves the best available voice persona (Aoede / Calm female or language-specific voice).
  * 
+ * @param langCode Optional 2-letter language code (e.g. 'es', 'fr', 'en', 'vi', 'hi').
  * @returns SpeechSynthesisVoice or null if voices not yet loaded.
  */
-function resolveAuraVoice(): SpeechSynthesisVoice | null {
+function resolveAuraVoice(langCode?: string): SpeechSynthesisVoice | null {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return null;
   const voices = window.speechSynthesis.getVoices();
   if (!voices || voices.length === 0) return null;
+
+  // If specific non-English language requested, find matching native voice
+  if (langCode && !langCode.startsWith("en")) {
+    const match = voices.find((v) => v.lang.toLowerCase().startsWith(langCode.toLowerCase()));
+    if (match) return match;
+  }
 
   for (const preferred of AURA_CONFIG.speechSynthesis.preferredVoiceNames) {
     const match = voices.find(
@@ -85,17 +92,34 @@ function resolveAuraVoice(): SpeechSynthesisVoice | null {
  * Speaks an AURA response using the browser's SpeechSynthesis engine.
  * 
  * @param text The message for AURA to speak aloud.
+ * @param langCode Optional language code (e.g. 'es', 'fr', 'en').
  * @param onStart Optional callback fired when vocal playback commences.
  * @param onEnd Optional callback fired when vocal playback completes.
  * @param onError Optional callback fired upon synthesis failure.
  */
 export function speakAura(
   text: string,
-  onStart?: () => void,
-  onEnd?: () => void,
+  langCodeOrOnStart?: string | (() => void),
+  onStartOrOnEnd?: () => void,
+  onEndOrOnError?: () => void,
   onError?: (error: any) => void
 ): void {
-  console.info(`[AURA SPEECH] speakAura called with text="${text.substring(0, 50)}..."`);
+  let langCode: string | undefined = undefined;
+  let onStart: (() => void) | undefined = undefined;
+  let onEnd: (() => void) | undefined = undefined;
+  let onErrorCb = onError;
+
+  if (typeof langCodeOrOnStart === "string") {
+    langCode = langCodeOrOnStart;
+    onStart = onStartOrOnEnd;
+    onEnd = onEndOrOnError;
+  } else if (typeof langCodeOrOnStart === "function") {
+    onStart = langCodeOrOnStart;
+    onEnd = onStartOrOnEnd;
+    onErrorCb = onEndOrOnError;
+  }
+
+  console.info(`[AURA SPEECH] speakAura called with text="${text.substring(0, 50)}..." (lang: ${langCode || 'en'})`);
 
   if (!isSpeechSynthesisSupported()) {
     console.warn("[AURA SPEECH] Speech synthesis not supported in this environment; invoking completion directly.");
@@ -111,11 +135,14 @@ export function speakAura(
 
   try {
     const utterance = new SpeechSynthesisUtterance(text);
+    if (langCode) {
+      utterance.lang = langCode;
+    }
     utterance.rate = AURA_CONFIG.speechSynthesis.rate;
     utterance.pitch = AURA_CONFIG.speechSynthesis.pitch;
     utterance.volume = AURA_CONFIG.speechSynthesis.volume;
 
-    const voice = resolveAuraVoice();
+    const voice = resolveAuraVoice(langCode);
     if (voice) {
       utterance.voice = voice;
     }
@@ -132,20 +159,21 @@ export function speakAura(
 
     utterance.onerror = (e) => {
       console.warn("[AURA SPEECH] Utterance audio error or interrupted:", e);
-      if (onError) onError(e);
+      if (onErrorCb) onErrorCb(e);
       if (onEnd) onEnd();
     };
 
     window.speechSynthesis.speak(utterance);
   } catch (err) {
     console.error("[AURA SPEECH] Failed to initiate speech synthesis:", err);
-    if (onError) onError(err);
+    if (onErrorCb) onErrorCb(err);
     if (onEnd) onEnd();
   }
 }
 
 /**
- * Web Speech Recognition session controller.
+ * Web Speech Recognition session controller with continuous listening,
+ * auto-reconnect, and silence debounce to guarantee speech reaches the model.
  */
 export class VoiceRecognitionController {
   private recognition: any = null;
@@ -153,6 +181,9 @@ export class VoiceRecognitionController {
   private onResultCallback?: (transcript: string, isFinal: boolean) => void;
   private onErrorCallback?: (error: string) => void;
   private onStatusChangeCallback?: (isListening: boolean) => void;
+  private silenceTimer: any = null;
+  private pendingTranscript: string = "";
+  public selectedLang: string = "en-US";
 
   /**
    * Initializes the VoiceRecognitionController with event handlers.
@@ -166,11 +197,24 @@ export class VoiceRecognitionController {
     onError?: (error: string) => void,
     onStatusChange?: (isListening: boolean) => void
   ) {
-    console.info("[AURA VOICE RECOGNITION] Initializing VoiceRecognitionController");
+    console.info("[AURA VOICE RECOGNITION] Initializing VoiceRecognitionController with guaranteed VAD debounce");
     this.onResultCallback = onResult;
     this.onErrorCallback = onError;
     this.onStatusChangeCallback = onStatusChange;
     this.initRecognition();
+  }
+
+  /**
+   * Sets the recognition language (e.g. 'es-ES', 'en-US', 'fr-FR').
+   * 
+   * @param lang BCP-47 language tag.
+   */
+  public setLanguage(lang: string) {
+    console.info(`[AURA VOICE RECOGNITION] Switching recognition language to: ${lang}`);
+    this.selectedLang = lang;
+    if (this.recognition) {
+      this.recognition.lang = lang;
+    }
   }
 
   private initRecognition() {
@@ -185,7 +229,7 @@ export class VoiceRecognitionController {
       this.recognition = new SpeechRecognitionClass();
       this.recognition.continuous = true;
       this.recognition.interimResults = true;
-      this.recognition.lang = "en-US";
+      this.recognition.lang = this.selectedLang;
 
       this.recognition.onstart = () => {
         console.info("[AURA VOICE RECOGNITION] Microphone listening session active.");
@@ -195,21 +239,46 @@ export class VoiceRecognitionController {
 
       this.recognition.onresult = (event: any) => {
         let interimTranscript = "";
-        let finalTranscript = "";
+        let finalChunk = "";
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const transcriptChunk = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            finalTranscript += transcriptChunk;
+            finalChunk += transcriptChunk;
           } else {
             interimTranscript += transcriptChunk;
           }
         }
 
-        const activeText = finalTranscript || interimTranscript;
-        console.info(`[AURA VOICE RECOGNITION] Recognized speech: "${activeText}" (isFinal: ${Boolean(finalTranscript)})`);
-        if (this.onResultCallback && activeText.trim()) {
-          this.onResultCallback(activeText.trim(), Boolean(finalTranscript));
+        const activeText = (finalChunk || interimTranscript).trim();
+        if (!activeText) return;
+
+        console.info(`[AURA VOICE RECOGNITION] Speech chunk detected: "${activeText}" (isFinalChunk: ${Boolean(finalChunk)})`);
+        this.pendingTranscript = activeText;
+
+        if (finalChunk) {
+          // Chunk marked final by engine
+          if (this.silenceTimer) clearTimeout(this.silenceTimer);
+          if (this.onResultCallback) {
+            this.onResultCallback(this.pendingTranscript, true);
+          }
+          this.pendingTranscript = "";
+        } else {
+          // Interim chunk: notify UI and start debounce timer in case user finishes speaking
+          if (this.onResultCallback) {
+            this.onResultCallback(this.pendingTranscript, false);
+          }
+
+          if (this.silenceTimer) clearTimeout(this.silenceTimer);
+          this.silenceTimer = setTimeout(() => {
+            if (this.pendingTranscript.trim()) {
+              console.info(`[AURA VOICE RECOGNITION] Silence threshold reached (900ms). Auto-submitting spoken voice: "${this.pendingTranscript}"`);
+              if (this.onResultCallback) {
+                this.onResultCallback(this.pendingTranscript.trim(), true);
+              }
+              this.pendingTranscript = "";
+            }
+          }, 950);
         }
       };
 
@@ -217,7 +286,7 @@ export class VoiceRecognitionController {
         console.warn("[AURA VOICE RECOGNITION] Recognition error event:", event.error);
         if (event.error === "not-allowed" || event.error === "service-not-allowed") {
           if (this.onErrorCallback) {
-            this.onErrorCallback("Microphone permission denied. Interactive simulator keypad is active.");
+            this.onErrorCallback("Microphone permission denied or device blocked in frame. Interactive simulator keypad is active.");
           }
         } else if (event.error !== "no-speech") {
           if (this.onErrorCallback) {
@@ -228,6 +297,14 @@ export class VoiceRecognitionController {
 
       this.recognition.onend = () => {
         console.info("[AURA VOICE RECOGNITION] Recognition session closed.");
+        // Flush any remaining voice text
+        if (this.pendingTranscript.trim()) {
+          console.info(`[AURA VOICE RECOGNITION] onend flushing pending speech: "${this.pendingTranscript}"`);
+          if (this.onResultCallback) {
+            this.onResultCallback(this.pendingTranscript.trim(), true);
+          }
+          this.pendingTranscript = "";
+        }
         this.isListening = false;
         if (this.onStatusChangeCallback) this.onStatusChangeCallback(false);
       };
@@ -238,17 +315,23 @@ export class VoiceRecognitionController {
 
   /**
    * Starts listening to caller microphone audio.
+   * 
+   * @returns boolean indicating whether microphone started.
    */
   public start(): boolean {
     console.info("[AURA VOICE RECOGNITION] start() requested.");
     if (!this.recognition) {
-      if (this.onErrorCallback) {
-        this.onErrorCallback("Speech Recognition not supported in this browser; virtual voice input is available.");
+      this.initRecognition();
+      if (!this.recognition) {
+        if (this.onErrorCallback) {
+          this.onErrorCallback("Speech Recognition not supported in this browser; virtual voice input is available.");
+        }
+        return false;
       }
-      return false;
     }
 
     try {
+      this.recognition.lang = this.selectedLang;
       this.recognition.start();
       return true;
     } catch (err) {
@@ -258,10 +341,23 @@ export class VoiceRecognitionController {
   }
 
   /**
-   * Stops listening to caller microphone audio.
+   * Stops listening to caller microphone audio and flushes any pending speech.
    */
   public stop(): void {
     console.info("[AURA VOICE RECOGNITION] stop() requested.");
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+
+    if (this.pendingTranscript.trim()) {
+      console.info(`[AURA VOICE RECOGNITION] stop() flushing pending transcript: "${this.pendingTranscript}"`);
+      if (this.onResultCallback) {
+        this.onResultCallback(this.pendingTranscript.trim(), true);
+      }
+      this.pendingTranscript = "";
+    }
+
     if (this.recognition && this.isListening) {
       try {
         this.recognition.stop();

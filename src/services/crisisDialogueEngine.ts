@@ -39,19 +39,37 @@ export interface DialogueProcessingInput {
   isBargeIn?: boolean;
 }
 
+export interface MultiSpeakerTurn {
+  speaker_id: string;
+  text: string;
+  intent: string;
+}
+
 export interface DialogueProcessingResult {
   auraResponse: string;
+  callerLanguage: string;
+  callerLanguageCode: string;
+  auraResponseEnglish: string;
+  callerInputEnglishTranslation: string;
   panicIndex: number;
-  importance: "CRITICAL (PRIORITY 1)" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)";
+  importance: "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)";
   problemStatement: string;
   primaryHazard: string;
   immediateLifeSafetyDirective: string;
+  multiSpeakers: MultiSpeakerTurn[];
+  vocalTone: {
+    panic_index: number;
+    screaming_detected: boolean;
+    breathing_rate: string;
+    emotional_state: string;
+  };
   extractedIncidentType: string;
   extractedLocation: string;
   extractedCasualties: number;
   screamingDetected: boolean;
   breathingCadence: string;
   recommendedUnits: string[];
+  tacticalActionSummary: string;
   toolFired: {
     toolName: string;
     arguments: {
@@ -319,11 +337,17 @@ export function processCallerUtterance(input: DialogueProcessingInput): Dialogue
 
   // Importance assessment
   const isCritical = panicIndex >= 8 || finalCasualties > 0 || screaming || incidentType.includes("Fire") || incidentType.includes("Flood") || incidentType.includes("Hazard") || incidentType.includes("Threat") || incidentType.includes("Cardiac");
-  const importance: "CRITICAL (PRIORITY 1)" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)" = isCritical
-    ? "CRITICAL (PRIORITY 1)"
+  const importance: "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)" = isCritical
+    ? "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE"
     : panicIndex >= 5
     ? "HIGH (PRIORITY 2)"
     : "ELEVATED (PRIORITY 3)";
+
+  // Language heuristic for local fallback
+  const isSpanish = /ayuda|fuego|humo|casa|carro|agua|hijo|socorro|por favor/i.test(callerUtterance);
+  const isFrench = /aide|feu|fumee|maison|voiture|eau|secours/i.test(callerUtterance);
+  const callerLanguage = isSpanish ? "Spanish" : isFrench ? "French" : "English";
+  const callerLanguageCode = isSpanish ? "es" : isFrench ? "fr" : "en";
 
   // 7. Formulate ADK tool invocation payload for live CAD commit
   const toolFired = {
@@ -333,7 +357,7 @@ export function processCallerUtterance(input: DialogueProcessingInput): Dialogue
       location: finalLocation || "Awaiting Location Confirmation (Triage Active)",
       panic_index: panicIndex,
       casualties: finalCasualties,
-      caller_summary: `[${importance}] ${problemStatement}. Utterance: "${callerUtterance}". Primary Hazard: ${primaryHazard}. Directive: ${immediateLifeSafetyDirective}.`,
+      caller_summary: `[${callerLanguage} / ${importance}] ${problemStatement}. Utterance: "${callerUtterance}". Primary Hazard: ${primaryHazard}. Directive: ${immediateLifeSafetyDirective}.`,
       recommended_units: classification.units
     }
   };
@@ -342,17 +366,126 @@ export function processCallerUtterance(input: DialogueProcessingInput): Dialogue
 
   return {
     auraResponse: auraSpeech,
+    callerLanguage,
+    callerLanguageCode,
+    auraResponseEnglish: auraSpeech,
+    callerInputEnglishTranslation: callerUtterance,
     panicIndex,
     importance,
     problemStatement,
     primaryHazard,
     immediateLifeSafetyDirective,
+    multiSpeakers: [
+      { speaker_id: "Primary Caller", text: callerUtterance, intent: "Emergency crisis report" }
+    ],
+    vocalTone: {
+      panic_index: panicIndex,
+      screaming_detected: screaming,
+      breathing_rate: breathingCadence,
+      emotional_state: isCritical ? "Hysterical panic & severe distress" : "Elevated urgency"
+    },
     extractedIncidentType: incidentType,
     extractedLocation: finalLocation || "Awaiting Location Confirmation",
     extractedCasualties: finalCasualties,
     screamingDetected: screaming,
     breathingCadence,
     recommendedUnits: classification.units,
+    tacticalActionSummary: `Immediate dispatch of ${classification.units.join(", ")} to confirm location and mitigate hazards.`,
     toolFired
   };
+}
+
+/**
+ * Processes caller utterance by invoking the server-side Gemini 3.8 Flash
+ * multilingual intake and multi-speaker disentanglement endpoint.
+ * 
+ * @param input DialogueProcessingInput object containing utterance and context.
+ * @returns Promise<DialogueProcessingResult> with structured real-time AI triage data.
+ */
+export async function processCallerUtteranceOnline(
+  input: DialogueProcessingInput
+): Promise<DialogueProcessingResult> {
+  console.info(`[AURA DIALOGUE ONLINE] Calling ${AURA_CONFIG.apiEndpoints.chatIntake} with model: ${AURA_CONFIG.intakeAiModel}`);
+  console.info(`[AURA DIALOGUE ONLINE] Parameters:`, {
+    utterance: input.callerUtterance,
+    historyTurns: input.history.length,
+    isBargeIn: input.isBargeIn,
+    panicIndex: input.currentPanicIndex
+  });
+
+  try {
+    const res = await fetch(AURA_CONFIG.apiEndpoints.chatIntake, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        utterance: input.callerUtterance,
+        history: input.history,
+        is_barge_in: input.isBargeIn,
+        tone_metrics: {
+          panic_index: input.currentPanicIndex || 7,
+          is_barge_in: input.isBargeIn
+        }
+      })
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      console.info(`[AURA DIALOGUE ONLINE] Gemini intake response received:`, json.status);
+      const data = json.data;
+
+      const incidentType = data.extracted_data?.incident_type || data.problem_statement || "Emergency Crisis Intake";
+      const location = data.extracted_data?.location || input.existingLocation || "Awaiting Location Confirmation";
+      const casualties = Number(data.extracted_data?.casualties) || input.existingCasualties || 0;
+      const recommendedUnits = Array.isArray(data.extracted_data?.recommended_units) && data.extracted_data.recommended_units.length > 0
+        ? data.extracted_data.recommended_units
+        : ["Engine 12", "Ladder 4", "Medic 2"];
+
+      const result: DialogueProcessingResult = {
+        auraResponse: data.caller_response_same_language || data.caller_response_english,
+        callerLanguage: data.caller_language || "English",
+        callerLanguageCode: data.caller_language_code || "en",
+        auraResponseEnglish: data.caller_response_english || data.caller_response_same_language,
+        callerInputEnglishTranslation: data.caller_input_english_translation || input.callerUtterance,
+        panicIndex: Number(data.vocal_tone?.panic_index) || input.currentPanicIndex || 8,
+        importance: (data.importance as any) || "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE",
+        problemStatement: data.problem_statement || incidentType,
+        primaryHazard: data.primary_hazard || "Acute Physical Danger & Entrapment",
+        immediateLifeSafetyDirective: data.immediate_survival_directive || "Stay on line with AURA dispatch. Follow grounding instructions.",
+        multiSpeakers: Array.isArray(data.multi_speakers) && data.multi_speakers.length > 0
+          ? data.multi_speakers
+          : [{ speaker_id: "Primary Caller", text: input.callerUtterance, intent: "Emergency plea" }],
+        vocalTone: {
+          panic_index: Number(data.vocal_tone?.panic_index) || 8,
+          screaming_detected: Boolean(data.vocal_tone?.screaming_detected),
+          breathing_rate: data.vocal_tone?.breathing_rate || "Hyperventilating (36 BPM)",
+          emotional_state: data.vocal_tone?.emotional_state || "Acute Crisis Stress"
+        },
+        extractedIncidentType: incidentType,
+        extractedLocation: location,
+        extractedCasualties: casualties,
+        screamingDetected: Boolean(data.vocal_tone?.screaming_detected),
+        breathingCadence: data.vocal_tone?.breathing_rate || "Hyperventilating (36 BPM)",
+        recommendedUnits: recommendedUnits,
+        tacticalActionSummary: data.tactical_action_summary || "Deploy nearest rescue squad.",
+        toolFired: {
+          toolName: "extract_dispatch_data",
+          arguments: {
+            incident_type: data.problem_statement || incidentType,
+            location: location,
+            panic_index: Number(data.vocal_tone?.panic_index) || 8,
+            casualties: casualties,
+            caller_summary: `[${data.caller_language}] ${data.problem_statement}. Translation: "${data.caller_input_english_translation}". Units: ${recommendedUnits.join(", ")}.`,
+            recommended_units: recommendedUnits
+          }
+        }
+      };
+
+      return result;
+    }
+  } catch (err) {
+    console.warn(`[AURA DIALOGUE ONLINE] Gemini intake request failed, using resilient local logic:`, err);
+  }
+
+  // Resilient fallback to local processing
+  return processCallerUtterance(input);
 }

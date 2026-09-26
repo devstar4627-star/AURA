@@ -15,6 +15,7 @@
 
 export interface AuraSystemConfig {
   aiModel: string;
+  intakeAiModel: string;
   framework: string;
   defaultVoice: string;
   speechSynthesis: {
@@ -42,6 +43,7 @@ export interface AuraSystemConfig {
     wsAudioBase: string;
     recentIncidents: string;
     manualDispatch: string;
+    chatIntake: string;
   };
   telemetry: {
     targetNotifyLatencyMs: number;
@@ -51,6 +53,7 @@ export interface AuraSystemConfig {
 
 export const AURA_CONFIG: AuraSystemConfig = {
   aiModel: "gemini-3.8-live",
+  intakeAiModel: "gemini-3.8-flash",
   framework: "google-adk",
   defaultVoice: "Aoede",
   speechSynthesis: {
@@ -78,6 +81,7 @@ export const AURA_CONFIG: AuraSystemConfig = {
     wsAudioBase: "/ws/audio",
     recentIncidents: "/api/incidents",
     manualDispatch: "/api/dispatch",
+    chatIntake: "/api/chat/intake",
   },
   telemetry: {
     targetNotifyLatencyMs: 1.2,

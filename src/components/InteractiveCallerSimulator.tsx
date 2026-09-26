@@ -41,7 +41,10 @@ import {
   ShieldAlert,
   HelpCircle,
   Copy,
-  Check
+  Check,
+  Languages,
+  Users,
+  Loader2
 } from "lucide-react";
 import { AURA_CONFIG } from "../config/auraConfig";
 import {
@@ -53,9 +56,11 @@ import {
   speechAudioFX
 } from "../services/speechService";
 import {
+  processCallerUtteranceOnline,
   processCallerUtterance,
   DialogueTurn,
-  DialogueProcessingResult
+  DialogueProcessingResult,
+  MultiSpeakerTurn
 } from "../services/crisisDialogueEngine";
 
 export interface InteractiveCallerSimulatorProps {
@@ -66,7 +71,7 @@ export interface InteractiveCallerSimulatorProps {
 
 export interface ActiveTriageFeedback {
   problemStatement: string;
-  importance: "CRITICAL (PRIORITY 1)" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)";
+  importance: "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)";
   primaryHazard: string;
   immediateLifeSafetyDirective: string;
   panicIndex: number;
@@ -78,44 +83,50 @@ export interface ActiveTriageFeedback {
   lastAuraSpeech: string;
   lastCallerSpeech: string;
   evaluatedAt: string;
+  callerLanguage: string;
+  callerLanguageCode: string;
+  auraResponseEnglish: string;
+  callerInputEnglishTranslation: string;
+  multiSpeakers: MultiSpeakerTurn[];
+  tacticalActionSummary: string;
 }
 
 const PRESET_CALLER_PHRASES = [
   {
-    label: "House Fire",
+    label: "Spanish Multi-Speaker Fire",
     icon: Flame,
     color: "text-red-400 border-red-500/40 bg-red-950/30",
-    text: "HELP! Black smoke is pouring up the stairs at 442 Industrial Parkway! My 2 kids are trapped on the second floor!"
+    text: "¡FUEGO! ¡Hay humo negro en 442 Industrial Parkway! [Voz al fondo de mi hija llorando]: ¡Mamá, la puerta está quemando, no puedo respirar! ¡Por favor ayúdenos, somos tres!"
   },
   {
-    label: "Flash Flood",
+    label: "English Submerged Vehicle",
     icon: Waves,
     color: "text-cyan-400 border-cyan-500/40 bg-cyan-950/30",
-    text: "My sedan is floating in rapid water under the Creek Road bridge! The water is up to my chest and doors won't open!"
+    text: "Help we are sinking! Water is over the hood on Creek Road! [Child screaming]: Daddy the window is stuck! [Wife sobbing]: I unbuckled the baby, hurry please!"
   },
   {
-    label: "Chemical Hazmat",
-    icon: AlertTriangle,
+    label: "French Industrial Toxic Vapor",
+    icon: Users,
     color: "text-amber-400 border-amber-500/40 bg-amber-950/30",
-    text: "Forklift punctured a toxic chlorine tank at Bay 14 Logistics Dock 8! Green gas is everywhere, workers collapsed!"
+    text: "URGENCE ABSOLUE ! Fuite massive de chlore au Quai 14, entrepôt Dock Street ! [Collègue qui tousse et hurle]: Évacuez, fermez les vannes ! On a 2 ouvriers au sol inconscients !"
   },
   {
-    label: "Highway Pileup",
-    icon: Siren,
+    label: "Mid-Sentence Barge-In",
+    icon: Zap,
     color: "text-orange-400 border-orange-500/40 bg-orange-950/30",
-    text: "Terrible 4-car pileup on Highway 101 near Mile 44! A minivan is crushed under a semi, two people trapped!"
+    text: "WAIT STOP TALKING! The ceiling just collapsed right above us! Forget the front door, we are trapped in the back bedroom window!"
   },
   {
-    label: "Home Intrusion",
+    label: "Home Intrusion in Progress",
     icon: ShieldAlert,
     color: "text-purple-400 border-purple-500/40 bg-purple-950/30",
-    text: "Someone is breaking through my back patio glass door with a pipe at 782 Elm Street! I'm hiding in the closet!"
+    text: "Someone is kicking through my back patio glass door with a crowbar at 782 Elm Street! [Heavy banging in background]: OPEN UP! I'm locked in the upstairs closet!"
   },
   {
-    label: "Cardiac Arrest",
+    label: "Agonal Cardiac Arrest",
     icon: HeartPulse,
     color: "text-emerald-400 border-emerald-500/40 bg-emerald-950/30",
-    text: "My husband collapsed on the floor at 120 Oak Lane! He's not breathing and turning blue, please send an ambulance!"
+    text: "My husband collapsed on the floor at 120 Oak Lane! He's not breathing, turning blue! [Daughter crying]: I'm doing chest compressions, tell me how fast!"
   }
 ];
 
@@ -143,9 +154,11 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
 
   // Active Real-Time Triage & Metrics Feedback State
   const [activeTriage, setActiveTriage] = useState<ActiveTriageFeedback | null>(null);
+  const [isAiThinking, setIsAiThinking] = useState(false);
 
   // Speech Recognition (Mic) State
   const [isMicListening, setIsMicListening] = useState(false);
+  const [micLang, setMicLang] = useState("en-US");
   const [micErrorNote, setMicErrorNote] = useState<string | null>(null);
   const [interimVoiceText, setInterimVoiceText] = useState("");
   const [isTtsMuted, setIsTtsMuted] = useState(false);
@@ -279,6 +292,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       );
     }
 
+    voiceRecognitionRef.current.setLanguage(micLang);
     const started = voiceRecognitionRef.current.start();
     if (!started) {
       setMicErrorNote("Microphone not available or permission denied in browser; please use the interactive buttons or keypad below.");
@@ -316,7 +330,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
   /**
    * Submits a caller utterance (from voice STT, typed text, or preset phrase).
    */
-  const handleCallerSendUtterance = (text: string) => {
+  const handleCallerSendUtterance = async (text: string) => {
     if (!text.trim()) return;
 
     console.info(`[CALL SIMULATOR] handleCallerSendUtterance: "${text}"`);
@@ -337,73 +351,89 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
     setDialogue((prev) => [...prev, callerTurn]);
     setUserInput("");
     setInterimVoiceText("");
+    setIsAiThinking(true);
 
-    // Process through the Crisis Dialogue Engine
-    const result: DialogueProcessingResult = processCallerUtterance({
-      callerUtterance: text,
-      history: [...dialogue, callerTurn],
-      currentPanicIndex: panicIndex,
-      existingLocation: currentLocation,
-      existingIncidentType: currentIncidentType,
-      existingCasualties: currentCasualties
-    });
+    try {
+      // Process through Gemini 3.8 Flash Online Multilingual Engine
+      const result: DialogueProcessingResult = await processCallerUtteranceOnline({
+        callerUtterance: text,
+        history: [...dialogue, callerTurn],
+        currentPanicIndex: panicIndex,
+        existingLocation: currentLocation,
+        existingIncidentType: currentIncidentType,
+        existingCasualties: currentCasualties,
+        isBargeIn: bargeInTriggered
+      });
 
-    // Update telemetry state
-    setPanicIndex(result.panicIndex);
-    setBreathingCadence(result.breathingCadence);
-    setScreamingActive(result.screamingDetected);
-    if (result.extractedLocation) setCurrentLocation(result.extractedLocation);
-    if (result.extractedIncidentType) setCurrentIncidentType(result.extractedIncidentType);
-    if (result.extractedCasualties > 0) setCurrentCasualties(result.extractedCasualties);
+      setIsAiThinking(false);
 
-    // Formulate and set real-time triage feedback immediately on screen
-    const triage: ActiveTriageFeedback = {
-      problemStatement: result.problemStatement,
-      importance: result.importance,
-      primaryHazard: result.primaryHazard,
-      immediateLifeSafetyDirective: result.immediateLifeSafetyDirective,
-      panicIndex: result.panicIndex,
-      screamingDetected: result.screamingDetected,
-      breathingCadence: result.breathingCadence,
-      casualties: result.extractedCasualties,
-      location: result.extractedLocation,
-      recommendedUnits: result.recommendedUnits,
-      lastAuraSpeech: result.auraResponse,
-      lastCallerSpeech: text,
-      evaluatedAt: new Date().toLocaleTimeString()
-    };
-    setActiveTriage(triage);
+      // Update telemetry state
+      setPanicIndex(result.panicIndex);
+      setBreathingCadence(result.breathingCadence);
+      setScreamingActive(result.screamingDetected);
+      if (result.extractedLocation) setCurrentLocation(result.extractedLocation);
+      if (result.extractedIncidentType) setCurrentIncidentType(result.extractedIncidentType);
+      if (result.extractedCasualties > 0) setCurrentCasualties(result.extractedCasualties);
 
-    // Invoke CAD dispatch commit to sync with database & dashboard
-    if (result.toolFired) {
-      const tool = result.toolFired;
-      speechAudioFX.playDispatchChime();
-      setDialogue((prev) => [
-        ...prev,
-        {
-          speaker: "SYSTEM",
-          text: `[ADK TOOL FIRED] ${tool.toolName}(${JSON.stringify(tool.arguments)})`
-        },
-        {
-          speaker: "SYSTEM",
-          text: `[POSTGRES NOTIFY] Trigger trg_notify_dispatch_incident() executed -> pg_notify('dispatch_events') [< 1.2ms]`
-        }
-      ]);
-
-      onDispatchReportFired({
-        ...tool.arguments,
+      // Formulate and set real-time triage feedback immediately on screen
+      const triage: ActiveTriageFeedback = {
         problemStatement: result.problemStatement,
         importance: result.importance,
         primaryHazard: result.primaryHazard,
-        immediateLifeSafetyDirective: result.immediateLifeSafetyDirective
-      });
-    }
+        immediateLifeSafetyDirective: result.immediateLifeSafetyDirective,
+        panicIndex: result.panicIndex,
+        screamingDetected: result.screamingDetected,
+        breathingCadence: result.breathingCadence,
+        casualties: result.extractedCasualties,
+        location: result.extractedLocation,
+        recommendedUnits: result.recommendedUnits,
+        lastAuraSpeech: result.auraResponse,
+        lastCallerSpeech: text,
+        evaluatedAt: new Date().toLocaleTimeString(),
+        callerLanguage: result.callerLanguage,
+        callerLanguageCode: result.callerLanguageCode,
+        auraResponseEnglish: result.auraResponseEnglish,
+        callerInputEnglishTranslation: result.callerInputEnglishTranslation,
+        multiSpeakers: result.multiSpeakers,
+        tacticalActionSummary: result.tacticalActionSummary
+      };
+      setActiveTriage(triage);
 
-    // AURA Speech Response Turn
-    setTimeout(() => {
+      // Invoke CAD dispatch commit to sync with database & dashboard
+      if (result.toolFired) {
+        const tool = result.toolFired;
+        speechAudioFX.playDispatchChime();
+        setDialogue((prev) => [
+          ...prev,
+          {
+            speaker: "SYSTEM",
+            text: `[ADK TOOL FIRED] ${tool.toolName}(${JSON.stringify(tool.arguments)})`
+          },
+          {
+            speaker: "SYSTEM",
+            text: `[POSTGRES NOTIFY] Trigger trg_notify_dispatch_incident() executed -> pg_notify('dispatch_events') [< 1.2ms]`
+          }
+        ]);
+
+        onDispatchReportFired({
+          ...tool.arguments,
+          problemStatement: result.problemStatement,
+          importance: result.importance,
+          primaryHazard: result.primaryHazard,
+          immediateLifeSafetyDirective: result.immediateLifeSafetyDirective,
+          callerLanguage: result.callerLanguage,
+          callerInputEnglishTranslation: result.callerInputEnglishTranslation
+        });
+      }
+
+      // Format AURA speech turn with language indication if non-English
+      const auraDisplayText = result.callerLanguage && !result.callerLanguage.toLowerCase().startsWith("en")
+        ? `[${result.callerLanguage.toUpperCase()}]: ${result.auraResponse}\n(English Translation: "${result.auraResponseEnglish}")`
+        : result.auraResponse;
+
       const auraTurn: DialogueTurn = {
         speaker: "AURA",
-        text: result.auraResponse
+        text: auraDisplayText
       };
 
       setDialogue((prev) => [...prev, auraTurn]);
@@ -411,11 +441,15 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       if (!isTtsMuted) {
         speakAura(
           result.auraResponse,
+          result.callerLanguageCode,
           () => setIsAiSpeaking(true),
           () => setIsAiSpeaking(false)
         );
       }
-    }, 350);
+    } catch (e) {
+      setIsAiThinking(false);
+      console.error("Error processing utterance through Gemini:", e);
+    }
   };
 
   /**
@@ -740,6 +774,68 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
             </div>
           </div>
 
+          {/* Real-Time Multilingual Translation Card */}
+          <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/40 text-xs font-mono space-y-2">
+            <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider">
+              <span className="flex items-center gap-1.5 text-purple-300">
+                <Languages className="w-3.5 h-3.5 text-purple-400" />
+                <span>MULTILINGUAL INTAKE ENGINE: {activeTriage.callerLanguage.toUpperCase()} ({activeTriage.callerLanguageCode.toUpperCase()})</span>
+              </span>
+              <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                <span>BIDIRECTIONAL TRANSLATION SYNCHRONIZED</span>
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+              <div className="p-2 rounded-lg bg-neutral-950/80 border border-neutral-800">
+                <span className="text-[10px] text-neutral-500 block uppercase">Spoken by Caller ({activeTriage.callerLanguage}):</span>
+                <p className="text-purple-200 italic mt-0.5 font-medium">"{activeTriage.lastCallerSpeech}"</p>
+              </div>
+              <div className="p-2 rounded-lg bg-neutral-950/80 border border-neutral-800">
+                <span className="text-[10px] text-cyan-400 block uppercase">Real-Time English CAD Translation:</span>
+                <p className="text-neutral-100 font-semibold mt-0.5">"{activeTriage.callerInputEnglishTranslation}"</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Multi-Speaker Audio Disentanglement & Intent Analysis */}
+          {activeTriage.multiSpeakers && activeTriage.multiSpeakers.length > 0 && (
+            <div className="p-3 rounded-xl bg-neutral-950/80 border border-neutral-800 space-y-2 font-mono text-xs">
+              <div className="text-[10px] text-neutral-400 uppercase tracking-wider font-bold flex items-center justify-between">
+                <span className="flex items-center gap-1.5 text-cyan-300">
+                  <Users className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>MULTI-SPEAKER DISENTANGLEMENT & INTENT BREAKDOWN ({activeTriage.multiSpeakers.length} Voice Streams Detected):</span>
+                </span>
+                <span className="text-[10px] text-neutral-500">Audio Stream Separator</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {activeTriage.multiSpeakers.map((spk, idx) => (
+                  <div key={idx} className="p-2 rounded-lg bg-neutral-900 border border-neutral-800 text-[11px]">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-bold text-cyan-300">{spk.speaker_id}</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50">
+                        Intent: {spk.intent}
+                      </span>
+                    </div>
+                    <p className="text-neutral-300 italic">"{spk.text}"</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Tactical Action Summary for Responders */}
+          {activeTriage.tacticalActionSummary && (
+            <div className="p-2.5 rounded-xl bg-neutral-900/90 border border-neutral-800 text-[11px] font-mono flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold uppercase text-[10px] flex-shrink-0">
+                ACTION PLAN
+              </span>
+              <span className="text-neutral-300 font-medium">
+                {activeTriage.tacticalActionSummary}
+              </span>
+            </div>
+          )}
+
           {/* Active AURA Interaction Bubble */}
           <div className="p-3 rounded-xl bg-blue-950/40 border border-blue-500/40 flex items-start gap-3 text-xs font-mono">
             <div className="p-2 rounded-lg bg-blue-600/30 text-blue-300 flex-shrink-0 mt-0.5">
@@ -747,12 +843,17 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
             </div>
             <div className="flex-1">
               <div className="text-[10px] font-bold text-blue-400 uppercase tracking-wider mb-1 flex items-center justify-between">
-                <span>AURA Crisis Co-Pilot Spoken Turn (gemini-3.8-live):</span>
+                <span>AURA Spoken Response in Same Language ({activeTriage.callerLanguage.toUpperCase()}):</span>
                 <span className="text-emerald-400 font-semibold">{isAiSpeaking ? "● SPEAKING ALOUD" : "TRANSMISSION COMPLETE"}</span>
               </div>
-              <p className="text-blue-100 font-sans text-xs sm:text-sm leading-relaxed">
+              <p className="text-blue-100 font-sans text-xs sm:text-sm leading-relaxed font-medium">
                 "{activeTriage.lastAuraSpeech}"
               </p>
+              {activeTriage.callerLanguage !== "English" && (
+                <div className="mt-1 pt-1 border-t border-blue-900/50 text-[11px] text-blue-300/80">
+                  <strong className="text-blue-200">English Translation for CAD:</strong> "{activeTriage.auraResponseEnglish}"
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -763,6 +864,17 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
             <span>Speak into microphone or select a crisis scenario to view real-time problem diagnosis and importance metrics.</span>
           </div>
           <span className="text-[10px] text-neutral-500 uppercase">Live Intake Radar Standby</span>
+        </div>
+      )}
+
+      {/* Live AI Processing Indicator */}
+      {isAiThinking && (
+        <div className="px-4 py-2.5 bg-neutral-900 border-b border-red-500/40 flex items-center gap-3 text-xs font-mono text-neutral-200 animate-pulse">
+          <Loader2 className="w-4 h-4 text-red-500 animate-spin flex-shrink-0" />
+          <div className="flex-1">
+            <span className="font-bold text-red-400">AURA Gemini 3.8 Flash Engine Processing:</span>
+            <span className="text-neutral-300 ml-1.5">Analyzing vocal tone, recognizing intent, separating multi-speaker audio, and translating in real time...</span>
+          </div>
         </div>
       )}
 
@@ -802,7 +914,16 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
                 >
                   {turn.speaker}
                 </div>
-                <div className="flex-1 leading-relaxed">{turn.text}</div>
+                <div className="flex-1 leading-relaxed whitespace-pre-line">{turn.text}</div>
+                {isAura && (
+                  <button
+                    onClick={() => speakAura(turn.text, activeTriage?.callerLanguageCode || "en")}
+                    title="Replay AURA spoken vocal response in detected language"
+                    className="p-1 rounded bg-blue-900/40 hover:bg-blue-800 text-blue-300 transition-colors flex-shrink-0"
+                  >
+                    <Volume2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             );
           })
@@ -863,20 +984,46 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
           </div>
         </div>
 
-        {/* Freeform Voice / Text Input Box */}
-        <div className="flex items-center gap-2 pt-1">
+        {/* Freeform Voice / Text Input Box with Multi-Language Support */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+          {/* Language Selector for STT & Spoken Intake */}
+          <div className="flex items-center gap-1.5 bg-neutral-950 px-2.5 py-2 rounded-xl border border-neutral-800 text-xs font-mono shrink-0">
+            <Languages className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <select
+              value={micLang}
+              onChange={(e) => {
+                const newLang = e.target.value;
+                setMicLang(newLang);
+                if (voiceRecognitionRef.current) {
+                  voiceRecognitionRef.current.setLanguage(newLang);
+                }
+              }}
+              title="Select spoken language for caller voice recognition"
+              className="bg-transparent text-neutral-200 text-xs focus:outline-none cursor-pointer"
+            >
+              <option value="en-US" className="bg-neutral-900 text-white">English (US)</option>
+              <option value="es-ES" className="bg-neutral-900 text-white">Español (ES/MX)</option>
+              <option value="fr-FR" className="bg-neutral-900 text-white">Français (FR)</option>
+              <option value="de-DE" className="bg-neutral-900 text-white">Deutsch (DE)</option>
+              <option value="vi-VN" className="bg-neutral-900 text-white">Tiếng Việt</option>
+              <option value="zh-CN" className="bg-neutral-900 text-white">中文 (Mandarin)</option>
+              <option value="hi-IN" className="bg-neutral-900 text-white">हिन्दी (Hindi)</option>
+              <option value="ar-SA" className="bg-neutral-900 text-white">العربية (Arabic)</option>
+            </select>
+          </div>
+
           {/* Live Voice Mic Button (Web Speech Recognition) */}
           <button
             onClick={toggleVoiceRecognition}
-            title={isMicListening ? "Stop Listening" : "Speak to AURA using Microphone"}
-            className={`p-2.5 rounded-xl border font-mono text-xs font-bold flex items-center gap-1.5 transition-all ${
+            title={isMicListening ? "Click to Stop Listening & Send" : "Speak to AURA using Microphone"}
+            className={`px-3 py-2 rounded-xl border font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition-all shrink-0 ${
               isMicListening
                 ? "bg-red-600 text-white border-red-500 animate-pulse shadow-lg shadow-red-950/50"
                 : "bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700"
             }`}
           >
-            {isMicListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4 text-emerald-400" />}
-            <span className="hidden sm:inline">{isMicListening ? "LISTENING..." : "PUSH TO TALK"}</span>
+            {isMicListening ? <MicOff className="w-4 h-4 text-white" /> : <Mic className="w-4 h-4 text-emerald-400" />}
+            <span>{isMicListening ? "LISTENING (CLICK TO SEND)" : "MIC INTAKE"}</span>
           </button>
 
           {/* Text Input Field */}
@@ -885,34 +1032,60 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
               type="text"
               placeholder={
                 isCallActive
-                  ? "Speak into mic or type: e.g. 'Stairs on fire at 500 Oak St, 2 people trapped!'"
+                  ? "Speak into mic or type your emergency message here..."
                   : "Click 'SIMULATE 911 INTAKE CALL' or type here to start speaking with AURA..."
               }
               value={userInput}
               onChange={(e) => setUserInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && userInput.trim()) {
-                  if (!isCallActive) handleStartCall();
-                  setTimeout(() => handleCallerSendUtterance(userInput), 150);
+                if (e.key === "Enter") {
+                  const toSend = userInput.trim() || interimVoiceText.trim();
+                  if (toSend) {
+                    if (!isCallActive) handleStartCall();
+                    if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
+                    setInterimVoiceText("");
+                    setTimeout(() => handleCallerSendUtterance(toSend), 150);
+                  }
                 }
               }}
               className="w-full px-3.5 py-2.5 rounded-xl bg-neutral-950 border border-neutral-800 text-xs font-mono text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:border-red-500/60 transition-colors"
             />
           </div>
 
+          {/* Transmit Heard Spoken Voice Button (if voice was recognized) */}
+          {interimVoiceText.trim() && (
+            <button
+              onClick={() => {
+                if (!isCallActive) handleStartCall();
+                const text = interimVoiceText.trim();
+                setInterimVoiceText("");
+                if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
+                setTimeout(() => handleCallerSendUtterance(text), 100);
+              }}
+              className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-950/50 animate-pulse shrink-0"
+              title="Immediately send what was recognized by microphone to AURA"
+            >
+              <Send className="w-4 h-4" />
+              <span>TRANSMIT HEARD AUDIO</span>
+            </button>
+          )}
+
           {/* Send Button */}
           <button
             onClick={() => {
-              if (userInput.trim()) {
+              const textToSend = userInput.trim() || interimVoiceText.trim();
+              if (textToSend) {
                 if (!isCallActive) handleStartCall();
-                setTimeout(() => handleCallerSendUtterance(userInput), 150);
+                if (voiceRecognitionRef.current) voiceRecognitionRef.current.stop();
+                setInterimVoiceText("");
+                setTimeout(() => handleCallerSendUtterance(textToSend), 150);
               }
             }}
-            disabled={!userInput.trim()}
-            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-mono text-xs font-bold transition-all flex items-center gap-1.5 shadow-md"
+            disabled={!userInput.trim() && !interimVoiceText.trim()}
+            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-40 text-white font-mono text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md shrink-0"
           >
             <Send className="w-4 h-4" />
-            <span className="hidden sm:inline">SPEAK / SEND</span>
+            <span className="hidden sm:inline">SEND TO AURA</span>
           </button>
         </div>
       </div>

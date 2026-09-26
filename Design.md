@@ -218,3 +218,24 @@ Every interaction (spoken via microphone or submitted via simulator) immediately
    - **Casualties Count**: Trapped or injured victim count.
    - **Geo-Location**: Verified address or pending status.
 6. **Live AURA Verbal Interaction Bubble**: Displays AURA's exact speech turn alongside real-time voice synthesis and speaker wave animation.
+
+---
+
+## 9. Multilingual Crisis Intake, Multi-Speaker Disentanglement & Tone Intelligence
+
+### 9.1 Server-Side Gemini 3.8 Flash Intake Engine
+- **Route**: `POST /api/chat/intake`
+- **Model**: `gemini-3.8-flash` initialized with server-side SDK (`@google/genai`) and `aistudio-build` User-Agent.
+- **Tuned System Instruction Template**:
+  1. **Same-Language Feedback**: Detects caller language (Spanish, English, French, German, Vietnamese, Mandarin, Hindi, Arabic, etc.) and formulates responses in the caller's exact same language with Aoede grounding cadence.
+  2. **Real-Time Translation**: Provides verbatim English translation of caller input and dispatcher responses in parallel for CAD records.
+  3. **Messy Multi-Speaker Audio Disentanglement**: Breaks down overlapping background voices (primary caller, screaming relative, crying child, bystander) into structured `multi_speakers` with verbatim text and deduced intent.
+  4. **Vocal Tone & Paralinguistics**: Evaluates panic index (1-10), screaming shriek detection, breathing rate BPM, and emotional distress state.
+  5. **Mid-Sentence Interruption (Barge-In)**: Truncates polite formalities and cuts straight to critical survival directives when interrupted mid-sentence.
+  6. **Structured Action Extraction**: Converts raw speech into categorized incident type, location, casualties, primary hazard, immediate survival directive, recommended responding units, and tactical action summary.
+
+### 9.2 Guaranteed Speech Transmission & Client Voice Activity Detection (VAD)
+- `VoiceRecognitionController` includes silence debounce timer (950ms) and automatic flush on disconnect to guarantee that speech input is never dropped.
+- Multilingual STT language selector allows callers to dictate in English, Spanish, French, German, Vietnamese, Mandarin, Hindi, or Arabic.
+- Instant "TRANSMIT HEARD AUDIO" button provides immediate 1-click submission without waiting for silence thresholds.
+- Spoken vocal replay buttons on all AURA transcript turns allow users to re-hear AURA's synthesized voice in the caller's language anytime.

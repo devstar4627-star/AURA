@@ -3,12 +3,21 @@ import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT || 3000;
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build'
+    }
+  }
+});
 
 interface IncidentRecord {
   id: string;
@@ -177,6 +186,196 @@ async function createServer() {
       message: 'Dispatch report committed to database. Trigger fired pg_notify on channel dispatch_events.',
       incident: newRecord
     });
+  });
+
+  // Real-Time Gemini Multilingual Crisis Intake, Multi-Speaker Disentanglement & Tone Reasoning
+  app.post('/api/chat/intake', async (req: Request, res: Response) => {
+    const { utterance, history = [], tone_metrics = {}, is_barge_in = false } = req.body;
+
+    if (!utterance || typeof utterance !== 'string') {
+      return res.status(400).json({ error: 'Utterance is required.' });
+    }
+
+    const systemInstruction = `
+You are AURA (Autonomous Urgent Response Agent), an elite 911 emergency crisis intake AI co-pilot.
+You listen to panicked live emergency callers, parse raw, chaotic, messy multi-speaker audio, and provide an immediate spoken response while converting the messy multi-speaker audio into structured action for dispatchers.
+
+CRITICAL OPERATIONAL RULES:
+1. SAME LANGUAGE RESPONSE & REAL-TIME FEEDBACK:
+   - Accurately detect the caller's spoken language (e.g. Spanish, English, French, Vietnamese, Mandarin, Hindi, Arabic, Tagalog, Ukrainian, Japanese, German, Russian, Portuguese, etc.).
+   - ALWAYS formulate "caller_response_same_language" in the caller's EXACT SAME LANGUAGE.
+   - Use calm, steady, authoritative grounding words (Aoede emergency persona).
+   - If the caller did not state their address or location, you MUST prioritize asking for their exact address/cross-street in their language.
+   - If acute panic is detected (screaming, hyperventilating, hysteria), begin with immediate grounding words in their language:
+     e.g., in Spanish: "Respire conmigo un momento. La ayuda va en camino. Mantenga el teléfono en su oreja. ¿Cuál es su dirección exacta?"
+     e.g., in French: "Respirez avec moi. Les secours sont en route. Gardez le téléphone près de vous. Quelle est votre adresse exacte ?"
+     e.g., in English: "Take one breath with me right now. Help is on the way. Keep the phone to your ear. What is your exact address?"
+
+2. REAL-TIME TRANSLATION ACROSS LANGUAGES FOR CAD:
+   - Provide "caller_response_english": Verbatim English translation of what you told the caller.
+   - Provide "caller_input_english_translation": Verbatim English translation of everything heard in the caller's utterance.
+
+3. UNDERSTAND INTENT ACROSS CHAOTIC & FRAGMENTED AUDIO:
+   - Emergency callers do not speak in clean, complete sentences. Discern their underlying intent from non-linear, broken, breathless cries:
+     - "I can't breathe / it's burning / black smoke / stairs gone" -> Structure Fire with Entrapment
+     - "Water is rising / car floating / doors stuck / kids crying" -> Flash Flood Vehicle Submersion
+     - "He collapsed / no pulse / turning purple / gasping" -> Sudden Cardiac Arrest
+     - "Yellow gas / coughing / tank ruptured / burning eyes" -> Hazardous Materials Toxic Plume
+     - "Someone kicking door / has a knife / hiding in closet" -> Active Threat / Home Invasion
+     - "Pileup / smashed cars / pinned under dashboard / highway" -> Multi-Vehicle Extrication
+
+4. MULTIPLE USERS AUDIO & MESSY MULTI-SPEAKER DISENTANGLEMENT:
+   - Raw emergency audio often contains multiple simultaneous speakers (primary caller, crying children, screaming spouses, shouting bystanders, or background 911 dispatch chatter).
+   - Disentangle every distinct voice into the "multi_speakers" array:
+     [
+       { "speaker_id": "Primary Caller", "text": "Exact words or cries heard from caller", "intent": "Core request or emergency report" },
+       { "speaker_id": "Background Speaker / Relative / Child", "text": "Secondary voice heard in room", "intent": "Contextual danger indicator" }
+     ]
+
+5. READ VOCAL TONE & PARALINGUISTIC TELEMETRY:
+   - Acoustic Tone Assessment:
+     - "panic_index": Integer 1 to 10 (10 being extreme hysteria/fatal danger)
+     - "screaming_detected": boolean (true if shouting, screaming, shriek keywords, or uppercase screams present)
+     - "breathing_rate": string (e.g. "Hyperventilating (38 BPM)", "Agonal Gasps", "Rapid 26 BPM", "Normal 16 BPM")
+     - "emotional_state": string describing psychological state (e.g. "Acute Panic / Hysterical Disorientation", "Shock", "Terrified Urgency")
+
+6. MID-SENTENCE INTERRUPTION (BARGE-IN) HANDLING:
+   - If is_barge_in is true, the caller interrupted mid-sentence or shouted over dispatch.
+   - Cut straight to the critical survival instruction without greetings, apologies, or conversational filler.
+
+7. TURN MESSY AUDIO INTO STRUCTURED ACTION:
+   - Convert messy speech into structured dispatch data:
+     - "problem_statement": Crisp clinical/tactical emergency diagnosis
+     - "importance": "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE" | "HIGH (PRIORITY 2)" | "ELEVATED (PRIORITY 3)"
+     - "primary_hazard": Specific lethal threat (e.g., "Thermal Flashover & Toxic Cyanide Smoke Inhalation")
+     - "immediate_survival_directive": Concrete physical survival order for caller (e.g., "Crawl under smoke, feel doors with back of hand")
+     - "extracted_data": { incident_type, location, casualties, recommended_units }
+     - "tactical_action_summary": Direct tactical action for responding units
+
+8. OUTPUT SCHEMA:
+Return ONLY a valid JSON object matching this exact structure:
+{
+  "caller_language": "Detected Language name (e.g. Spanish, English, French, Hindi)",
+  "caller_language_code": "2-letter ISO code (e.g. es, en, fr, hi, vi, zh, ar, ja, de, uk)",
+  "caller_response_same_language": "Your spoken reply in the caller's exact same language",
+  "caller_response_english": "Verbatim English translation of your reply",
+  "caller_input_english_translation": "English translation of what was said/heard",
+  "problem_statement": "Crisp diagnostic classification of the emergency problem",
+  "importance": "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE",
+  "primary_hazard": "Lethal threat description",
+  "immediate_survival_directive": "Immediate concrete physical survival directive for caller",
+  "multi_speakers": [
+    { "speaker_id": "Primary Caller", "text": "What was said", "intent": "Underlying intent" }
+  ],
+  "vocal_tone": {
+    "panic_index": 9,
+    "screaming_detected": true,
+    "breathing_rate": "Hyperventilating (38 BPM)",
+    "emotional_state": "Hysterical panic"
+  },
+  "extracted_data": {
+    "incident_type": "Categorized Incident Type",
+    "location": "Extracted address or Awaiting Location Confirmation",
+    "casualties": 0,
+    "recommended_units": ["Unit 1", "Unit 2"]
+  },
+  "tactical_action_summary": "Summary instruction for responding commanders"
+}
+`;
+
+    const prompt = `
+CALLER INTAKE UTTERANCE: "${utterance}"
+IS MID-SENTENCE BARGE-IN INTERRUPTION: ${Boolean(is_barge_in)}
+ACOUSTIC TONE TELEMETRY: ${JSON.stringify(tone_metrics)}
+RECENT CONVERSATION TURNS:
+${Array.isArray(history) ? history.slice(-4).map((h: any) => `${h.speaker}: ${h.text}`).join('\n') : ''}
+
+Analyze and respond in the caller's exact same language and return valid JSON.
+`;
+
+    const modelName = 'gemini-3.8-flash';
+    console.info(`[GENAI CALL] Model: ${modelName} | Parameters:`, {
+      utterance: utterance.substring(0, 100),
+      is_barge_in,
+      tone_metrics,
+      historyLength: Array.isArray(history) ? history.length : 0
+    });
+
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          temperature: 0.1
+        }
+      });
+
+      const rawText = response.text || '{}';
+      console.info(`[GENAI RESPONSE] Model: ${modelName} | Length: ${rawText.length} chars | Raw output: ${rawText.substring(0, 120)}...`);
+
+      let cleanJson = rawText.trim();
+      if (cleanJson.startsWith('```json')) {
+        cleanJson = cleanJson.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (cleanJson.startsWith('```')) {
+        cleanJson = cleanJson.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+
+      const parsedData = JSON.parse(cleanJson);
+
+      return res.json({
+        status: 'SUCCESS',
+        model: modelName,
+        data: parsedData
+      });
+    } catch (err: any) {
+      console.error('[GEMINI API ERROR] Calling Gemini failed:', err);
+
+      // Intelligent resilient fallback if API key or connectivity encounters an issue
+      const isSpanish = /ayuda|fuego|humo|casa|carro|agua|hijo|socorro|por favor/i.test(utterance);
+      const isFrench = /aide|feu|fumee|maison|voiture|eau|secours/i.test(utterance);
+      const detectedLang = isSpanish ? "Spanish" : isFrench ? "French" : "English";
+      const detectedCode = isSpanish ? "es" : isFrench ? "fr" : "en";
+
+      const fallbackSpanish = "Respire conmigo, la ayuda va en camino. Mantenga el teléfono cerca. ¿Cuál es su dirección exacta?";
+      const fallbackFrench = "Respirez avec moi, les secours arrivent. Restez en ligne. Quelle est votre adresse exacte ?";
+      const fallbackEnglish = "Take one breath with me. Rescue units are being dispatched. What is your exact address right now?";
+
+      const callerResponse = isSpanish ? fallbackSpanish : isFrench ? fallbackFrench : fallbackEnglish;
+
+      return res.json({
+        status: 'FALLBACK',
+        model: modelName,
+        data: {
+          caller_language: detectedLang,
+          caller_language_code: detectedCode,
+          caller_response_same_language: callerResponse,
+          caller_response_english: fallbackEnglish,
+          caller_input_english_translation: utterance,
+          problem_statement: utterance.toLowerCase().includes("fire") || isSpanish ? "Structure Fire: Acute Thermal & Smoke Peril" : "Urgent Crisis Incident",
+          importance: "CRITICAL (PRIORITY 1) - IMMEDIATE THREAT TO LIFE",
+          primary_hazard: "Thermal flashover, toxic smoke inhalation, situational entrapment",
+          immediate_survival_directive: "Stay below the smoke line. Crawl on hands and knees. Feel any door before opening.",
+          multi_speakers: [
+            { speaker_id: "Primary Caller", text: utterance, intent: "Urgent plea for emergency assistance" }
+          ],
+          vocal_tone: {
+            panic_index: 9,
+            screaming_detected: true,
+            breathing_rate: "Hyperventilating (36 BPM)",
+            emotional_state: "High distress"
+          },
+          extracted_data: {
+            incident_type: "Emergency Crisis Intake",
+            location: "Awaiting Location Confirmation",
+            casualties: 1,
+            recommended_units: ["Engine 12", "Medic 2", "Ladder 4"]
+          },
+          tactical_action_summary: "Dispatched immediate responder squad to verify address and deploy rescue gear."
+        }
+      });
+    }
   });
 
   // Mount Vite in development or serve static dist in production

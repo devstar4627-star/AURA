@@ -282,3 +282,51 @@ Every interaction (spoken via microphone or submitted via simulator) immediately
   - Future LLM prompts inject the distilled executive summary alongside only the latest active short-term turns, preventing prompt overflow while guaranteeing zero loss of tactical facts.
 - **Interactive UI Testing**: Features a "TRIGGER 20K SUMMARIZATION" control in the chat console to allow immediate testing and demonstration of context compression.
 
+---
+
+## 11. Backend MemoryManager Architecture & Bidirectional WebSocket Engine
+
+### 11.1 Backend `MemoryManager` & Dedicated `CallSessionStore` (`server/memoryManager.ts`)
+The `MemoryManager` class provides thread-safe, high-speed short-term session storage backed by SQLite (`db/aura_memory.sqlite`), guaranteeing dedicated session store isolation for every 911 emergency call:
+
+1. **Dedicated Per-Call Session Store (`CallSessionStore`)**:
+   - Every call is identified by its unique `call_id` and assigned an isolated SQLite session record (`session_id`).
+   - `memoryManager.getOrCreateSessionStore(callId, language, languageCode)` provisions a dedicated `CallSessionStore` instance.
+   - Encapsulates short-term turn commits, token counter tracking, and context window compression.
+   - Complete data isolation ensures concurrent callers never leak conversational history or paralinguistic distress telemetry.
+
+2. **Automated 20K-Token Summarization Middleware Integration**:
+   - `CallSessionStore.addTurn(...)` commits each turn to SQLite and immediately checks the 20,000-token threshold.
+   - When cumulative tokens hit $\ge 20,000$ (or on test triggers), the summarization middleware automatically invokes `gemini-3.8-flash`.
+   - Distills older turns into an Executive Incident Summary, preserving all critical physical addresses, confirmed hazards, trapped victims, dispatched squads, and active survival orders.
+   - Automatically updates session token counts and marks the session as summarized (`is_summarized = 1`).
+
+3. **Context Window Optimization for Inference (`getContextForPrompt`)**:
+   - Generates the optimal prompt payload: `[Distilled Executive Summary] + [Latest N Active Short-Term Turns]`.
+   - Prevents token bloat, keeps inference sub-second responsive, and ensures 100% tactical continuity over 50+ turns.
+
+4. **Telemetry & Inspection APIs**:
+   - `GET /api/memory/stats`: Returns real-time metrics across all active dedicated stores (turn counts, token counts, threshold percentages, summarization state).
+
+### 11.2 Real-Time Full-Duplex Bidirectional Communication Engine (`server/bidirectionalWsServer.ts`, `src/services/bidirectionalService.ts`)
+Full-duplex bidirectional streaming connects frontend callers and dispatchers directly with the backend `MemoryManager` and Gemini inference pipeline:
+
+1. **Architecture & Transport**:
+   - Mounted via WebSocket Server (`ws`) directly on the shared Node.js HTTP server at endpoint `/ws/call`.
+   - Replaces unidirectional polling with instant bidirectional framing.
+
+2. **Bidirectional Protocol Framing**:
+   - **`CALL_INIT` (Client $\rightarrow$ Server)**: Binds the WebSocket connection to a dedicated `CallSessionStore` instance.
+   - **`CALL_INITIALIZED` (Server $\rightarrow$ Client)**: Confirms dedicated store allocation, session ID, and token telemetry.
+   - **`CALLER_UTTERANCE` (Client $\rightarrow$ Server)**: Streams caller speech/text, acoustic distress metrics, and barge-in flags.
+   - **`TURN_COMMITTED` (Server $\rightarrow$ Client)**: Confirms short-term turn commit to SQLite with updated token count.
+   - **`AI_RESPONSE` (Server $\rightarrow$ Client)**: Delivers immediate spoken reply in caller's language, English translation, acoustic tone analysis, and structured CAD actions.
+   - **`BARGE_IN` (Client $\rightarrow$ Server)**: High-priority signal when caller speaks over AURA.
+   - **`BARGE_IN_CONFIRMED` (Server $\rightarrow$ Client)**: Confirms audio cutoff with sub-30ms round-trip latency telemetry.
+   - **`SUMMARIZE_REQUEST` (Client $\rightarrow$ Server)**: Triggers manual or test 20K context summarization.
+   - **`CONTEXT_SUMMARIZED` (Server $\rightarrow$ Client)**: Emitted whenever the 20K token middleware compresses the context window.
+
+3. **Client-Side Resilient Reconnection**:
+   - `BidirectionalService` singleton provides exponential backoff reconnects, heartbeat ping-pong tracking, and real-time status broadcasting to UI components (`CONNECTED`, `CONNECTING`, `DISCONNECTED`).
+
+

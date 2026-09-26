@@ -67,6 +67,7 @@ export interface ChatSessionProps {
   onReplaySpeech: (text: string, langCode?: string) => void;
   onTriggerTestSummarization: () => void;
   contextTokenLimit?: number;
+  wsStatus?: "CONNECTED" | "CONNECTING" | "DISCONNECTED" | "ERROR";
 }
 
 export const DispatchChatSession: React.FC<ChatSessionProps> = ({
@@ -83,7 +84,8 @@ export const DispatchChatSession: React.FC<ChatSessionProps> = ({
   onBargeInCutoff,
   onReplaySpeech,
   onTriggerTestSummarization,
-  contextTokenLimit = 20000
+  contextTokenLimit = 20000,
+  wsStatus = "CONNECTED"
 }) => {
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
@@ -114,6 +116,18 @@ export const DispatchChatSession: React.FC<ChatSessionProps> = ({
               </span>
               <span className="px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-400 text-[10px]">
                 {sessionData ? sessionData.session_id : "STANDBY SESSION"}
+              </span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border ${
+                wsStatus === "CONNECTED"
+                  ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-400"
+                  : wsStatus === "CONNECTING"
+                  ? "bg-amber-950/60 border-amber-500/40 text-amber-400 animate-pulse"
+                  : "bg-red-950/60 border-red-500/40 text-red-400"
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  wsStatus === "CONNECTED" ? "bg-emerald-400 animate-ping" : "bg-neutral-500"
+                }`} />
+                <span>WS: {wsStatus}</span>
               </span>
             </div>
             <p className="text-[10px] text-neutral-400">

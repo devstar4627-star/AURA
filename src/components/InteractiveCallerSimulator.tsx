@@ -70,6 +70,7 @@ import {
   SqlSessionData,
   SqlSummaryData
 } from "../services/sqlMemoryService";
+import { bidirectionalService } from "../services/bidirectionalService";
 
 export interface InteractiveCallerSimulatorProps {
   onDispatchReportFired: (report: any) => void;
@@ -168,6 +169,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
   // Active Real-Time Triage & Metrics Feedback State
   const [activeTriage, setActiveTriage] = useState<ActiveTriageFeedback | null>(null);
   const [isAiThinking, setIsAiThinking] = useState(false);
+  const [wsStatus, setWsStatus] = useState<"CONNECTED" | "CONNECTING" | "DISCONNECTED" | "ERROR">("CONNECTING");
 
   // Speech Recognition (Mic) State
   const [isMicListening, setIsMicListening] = useState(false);
@@ -177,6 +179,34 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
   const [isTtsMuted, setIsTtsMuted] = useState(false);
   const voiceRecognitionRef = useRef<VoiceRecognitionController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-connect and subscribe to bidirectional WebSocket service
+  useEffect(() => {
+    bidirectionalService.connect();
+    const unsubStatus = bidirectionalService.onStatusChange((status) => {
+      setWsStatus(status);
+    });
+    const unsubMsg = bidirectionalService.onMessage((msg) => {
+      if (msg.type === "CONTEXT_SUMMARIZED" && msg.summarization?.summaryText) {
+        setActiveSummary(msg.summarization.summaryText);
+        setSessionData((prev) =>
+          prev
+            ? {
+                ...prev,
+                token_count: msg.tokenCount || prev.token_count,
+                summary: msg.summarization.summaryText,
+                is_summarized: 1
+              }
+            : null
+        );
+      }
+    });
+
+    return () => {
+      unsubStatus();
+      unsubMsg();
+    };
+  }, []);
 
   // Auto-scroll transcript feed
   useEffect(() => {
@@ -234,6 +264,9 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
     }).catch((err) => {
       console.warn("[CALL SIMULATOR] Error creating SQL session:", err);
     });
+
+    // Initialize dedicated store in bidirectional WebSocket service
+    bidirectionalService.initializeCall(newCallId, "English", "en");
 
     const initialGreeting = "AURA 911 emergency dispatch. I am on the line with you. What is your exact address and what is happening?";
 
@@ -340,6 +373,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
     console.info("[CALL SIMULATOR] handleBargeInCutoff executing.");
     cancelSpeech("user-barge-in-interruption");
     speechAudioFX.playBargeInClick();
+    bidirectionalService.sendBargeIn();
     setIsAiSpeaking(false);
     setBargeInTriggered(true);
     setBargeInCount((prev) => prev + 1);
@@ -969,6 +1003,7 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
           onReplaySpeech={(text) => speakAura(text, activeTriage?.callerLanguageCode || "en")}
           onTriggerTestSummarization={handleTriggerTestSummarization}
           contextTokenLimit={AURA_CONFIG.memory.contextTokenLimit}
+          wsStatus={wsStatus}
         />
       </div>
 

@@ -41,6 +41,7 @@ export interface AuraSystemConfig {
   apiEndpoints: {
     sseDashboard: string;
     wsAudioBase: string;
+    wsBidirectional: string;
     recentIncidents: string;
     manualDispatch: string;
     chatIntake: string;
@@ -91,6 +92,7 @@ export const AURA_CONFIG: AuraSystemConfig = {
   apiEndpoints: {
     sseDashboard: "/api/events/dashboard",
     wsAudioBase: "/ws/audio",
+    wsBidirectional: "/ws/call",
     recentIncidents: "/api/incidents",
     manualDispatch: "/api/dispatch",
     chatIntake: "/api/chat/intake",

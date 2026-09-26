@@ -1,9 +1,12 @@
+import http from 'node:http';
 import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { MemoryManager } from './server/memoryManager.ts';
+import { BidirectionalWsServer } from './server/bidirectionalWsServer.ts';
 import {
   createSession,
   getSession,
@@ -128,6 +131,9 @@ async function createServer() {
   const app = express();
   app.use(express.json());
 
+  // Initialize MemoryManager for short-term SQLite session storage & 20K summarization
+  const memoryManager = MemoryManager.getInstance(ai);
+
   // API Healthcheck
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -135,7 +141,8 @@ async function createServer() {
       service: 'AURA Crisis Dispatch Co-Pilot',
       model: 'gemini-3.8-live',
       pubsub: 'PostgreSQL LISTEN/NOTIFY',
-      subscribers: sseClients.length
+      subscribers: sseClients.length,
+      memoryStores: memoryManager.getActiveStoresStats().length
     });
   });
 
@@ -202,33 +209,42 @@ async function createServer() {
 
   // --- Persistent SQL Memory & Session Management Routes ---
   
-  // Start / Register a new Call Session (treating each new call as a separate session)
+  // Start / Register a new Call Session (ensuring each call gets a dedicated session store)
   app.post('/api/memory/session/start', (req: Request, res: Response) => {
     const { call_id, caller_language = 'English', caller_language_code = 'en' } = req.body;
     const sessionCallId = call_id || `CALL-${Math.floor(Math.random() * 90000 + 10000)}`;
-    const session = createSession(sessionCallId, caller_language, caller_language_code);
+    const store = memoryManager.createSessionStore(sessionCallId, caller_language, caller_language_code);
+    const session = store.getSessionRecord();
     res.status(201).json({ status: 'SUCCESS', session });
   });
 
   // List past sessions from SQL memory
   app.get('/api/memory/sessions', (_req: Request, res: Response) => {
-    const sessions = listSessions(50);
+    const sessions = memoryManager.listAllSessions(50);
     res.json({ status: 'SUCCESS', count: sessions.length, sessions });
+  });
+
+  // Get active dedicated stores telemetry stats
+  app.get('/api/memory/stats', (_req: Request, res: Response) => {
+    const activeStores = memoryManager.getActiveStoresStats();
+    res.json({ status: 'SUCCESS', count: activeStores.length, activeStores });
   });
 
   // Get full session detail, turns, and summaries
   app.get('/api/memory/session/:sessionId', (req: Request, res: Response) => {
     const { sessionId } = req.params;
-    const session = getSession(sessionId);
-    if (!session) {
+    const store = memoryManager.getSessionStore(sessionId);
+    if (!store) {
       return res.status(404).json({ error: 'Session not found in SQL memory' });
     }
-    const turns = getSessionTurns(sessionId);
-    const summaries = getSessionSummaries(sessionId);
-    res.json({ status: 'SUCCESS', session, turns, summaries });
+    const session = store.getSessionRecord();
+    const turns = store.getTurns();
+    const summaries = store.getSummaries();
+    const stats = store.getStats();
+    res.json({ status: 'SUCCESS', session, turns, summaries, stats });
   });
 
-  // Record an individual turn into SQL memory & run summarization middleware check
+  // Record an individual turn into dedicated SQL memory store & run summarization middleware check
   app.post('/api/memory/turn', async (req: Request, res: Response) => {
     const { session_id, speaker, text, english_translation, tone_metrics, intent, is_barge_in } = req.body;
     if (!session_id || !text) {
@@ -236,8 +252,12 @@ async function createServer() {
     }
 
     try {
-      const turn = addMemoryTurn({
-        sessionId: session_id,
+      const store = memoryManager.getSessionStore(session_id);
+      if (!store) {
+        return res.status(404).json({ error: `Session store for ${session_id} not found.` });
+      }
+
+      const result = await store.addTurn({
         speaker: speaker || 'CALLER',
         text,
         englishTranslation: english_translation,
@@ -246,15 +266,11 @@ async function createServer() {
         isBargeIn: Boolean(is_barge_in)
       });
 
-      // Check if context length reached 20K tokens (or test threshold)
-      const summarization = await checkAndExecuteSummarizationMiddleware(ai, session_id);
-      const updatedSession = getSession(session_id);
-
       res.status(201).json({
         status: 'SUCCESS',
-        turn,
-        sessionTokenCount: updatedSession?.token_count || 0,
-        summarization
+        turn: result.turn,
+        sessionTokenCount: result.currentTokenCount,
+        summarization: result.summarization
       });
     } catch (err: any) {
       console.error('[SQL MEMORY API ERROR]', err);
@@ -270,7 +286,7 @@ async function createServer() {
     }
 
     try {
-      const result = await checkAndExecuteSummarizationMiddleware(ai, session_id, { force });
+      const result = await memoryManager.triggerSummarization(session_id, Boolean(force));
       res.json({ status: 'SUCCESS', result });
     } catch (err: any) {
       console.error('[SUMMARIZATION MIDDLEWARE API ERROR]', err);
@@ -286,26 +302,20 @@ async function createServer() {
       return res.status(400).json({ error: 'Utterance is required.' });
     }
 
-    // Resolve or initialize active session in persistent SQL memory
-    let activeSession = session_id ? getSession(session_id) : null;
-    if (!activeSession && call_id) {
-      activeSession = getLatestSessionByCallId(call_id);
-    }
-    if (!activeSession) {
-      const assignedCallId = call_id || `CALL-${Math.floor(Math.random() * 90000 + 10000)}`;
-      activeSession = createSession(assignedCallId, "English", "en");
-    }
+    // Resolve or initialize active dedicated session store via MemoryManager
+    const sessionStore = memoryManager.getOrCreateSessionStore(session_id || call_id || `CALL-${Math.floor(Math.random() * 90000 + 10000)}`);
+    const activeSession = sessionStore.getSessionRecord()!;
 
-    // Commit incoming caller utterance to short-term SQL memory
+    // Commit incoming caller utterance to dedicated short-term SQL memory store
     let callerTurnRecord: any = null;
     try {
-      callerTurnRecord = addMemoryTurn({
-        sessionId: activeSession.session_id,
+      const turnResult = await sessionStore.addTurn({
         speaker: "CALLER",
         text: utterance,
         toneMetrics: tone_metrics,
         isBargeIn: Boolean(is_barge_in)
       });
+      callerTurnRecord = turnResult.turn;
     } catch (dbErr) {
       console.warn("[SQL MEMORY WARNING] Error recording caller turn:", dbErr);
     }
@@ -446,18 +456,18 @@ Analyze and respond in the caller's exact same language and return valid JSON.
 
       const parsedData = JSON.parse(cleanJson);
 
-      // Record AURA response into SQL short-term memory
+      // Record AURA response into dedicated SQL short-term memory store
+      let auraTurnResult: any = null;
       try {
-        addMemoryTurn({
-          sessionId: activeSession.session_id,
+        auraTurnResult = await sessionStore.addTurn({
           speaker: "AURA",
           text: parsedData.caller_response_same_language || parsedData.caller_response_english,
           englishTranslation: parsedData.caller_response_english,
           intent: parsedData.problem_statement
         });
 
-        // Update session metadata
-        updateSessionMetadata(activeSession.session_id, {
+        // Update session metadata in SQLite
+        sessionStore.updateMetadata({
           caller_language: parsedData.caller_language,
           caller_language_code: parsedData.caller_language_code,
           incident_type: parsedData.extracted_data?.incident_type || parsedData.problem_statement,
@@ -468,14 +478,14 @@ Analyze and respond in the caller's exact same language and return valid JSON.
       }
 
       // Check if 20K token context threshold reached and trigger summarization middleware
-      const summarization = await checkAndExecuteSummarizationMiddleware(ai, activeSession.session_id);
-      const reloadedSession = getSession(activeSession.session_id);
+      const summarization = auraTurnResult?.summarization || await sessionStore.checkSummarizationMiddleware();
+      const currentTokenCount = sessionStore.getTokenCount();
 
       return res.json({
         status: 'SUCCESS',
         model: modelName,
-        session_id: activeSession.session_id,
-        session_token_count: reloadedSession?.token_count || 0,
+        session_id: sessionStore.sessionId,
+        session_token_count: currentTokenCount,
         summarization,
         data: parsedData
       });
@@ -494,10 +504,9 @@ Analyze and respond in the caller's exact same language and return valid JSON.
 
       const callerResponse = isSpanish ? fallbackSpanish : isFrench ? fallbackFrench : fallbackEnglish;
 
-      // Record fallback turn in SQL memory
+      // Record fallback turn in dedicated SQL store
       try {
-        addMemoryTurn({
-          sessionId: activeSession.session_id,
+        await sessionStore.addTurn({
           speaker: "AURA",
           text: callerResponse,
           englishTranslation: fallbackEnglish,
@@ -505,13 +514,13 @@ Analyze and respond in the caller's exact same language and return valid JSON.
         });
       } catch {}
 
-      const reloadedSession = getSession(activeSession.session_id);
+      const currentTokenCount = sessionStore.getTokenCount();
 
       return res.json({
         status: 'FALLBACK',
         model: modelName,
-        session_id: activeSession.session_id,
-        session_token_count: reloadedSession?.token_count || 0,
+        session_id: sessionStore.sessionId,
+        session_token_count: currentTokenCount,
         summarization: { triggered: false },
         data: {
           caller_language: detectedLang,
@@ -559,8 +568,11 @@ Analyze and respond in the caller's exact same language and return valid JSON.
     });
   }
 
-  app.listen(Number(PORT), '0.0.0.0', () => {
-    console.log(`[AURA SERVER] Listening on http://0.0.0.0:${PORT}`);
+  const httpServer = http.createServer(app);
+  const wsServer = new BidirectionalWsServer(httpServer, memoryManager, ai, broadcastPostgresNotify);
+
+  httpServer.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`[AURA SERVER] Listening on http://0.0.0.0:${PORT} (HTTP & WebSocket Bidirectional)`);
   });
 }
 

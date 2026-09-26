@@ -35,7 +35,7 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import fs from "node:fs";
-import { AURA_CONFIG } from "../src/config/auraConfig.js";
+import { AURA_CONFIG } from "../src/config/auraConfig.ts";
 
 export interface SessionRecord {
   id?: number;

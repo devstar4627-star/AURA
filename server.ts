@@ -14,8 +14,8 @@ import {
   getLatestSessionByCallId,
   getSessionSummaries,
   recordSessionSummary
-} from './server/sqlMemoryDatabase.js';
-import { checkAndExecuteSummarizationMiddleware } from './server/summarizationMiddleware.js';
+} from './server/sqlMemoryDatabase.ts';
+import { checkAndExecuteSummarizationMiddleware } from './server/summarizationMiddleware.ts';
 
 dotenv.config();
 

@@ -38,15 +38,17 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { AURA_CONFIG } from "../src/config/auraConfig.js";
+import { AURA_CONFIG } from "../src/config/auraConfig.ts";
 import {
   getSession,
   getSessionTurns,
   recordSessionSummary,
-  updateSessionMetadata,
+  updateSessionMetadata
+} from "./sqlMemoryDatabase.ts";
+import type {
   MemoryTurnRecord,
   SessionRecord
-} from "./sqlMemoryDatabase.js";
+} from "./sqlMemoryDatabase.ts";
 
 export interface SummarizationResult {
   triggered: boolean;

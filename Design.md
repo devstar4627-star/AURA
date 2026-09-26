@@ -329,4 +329,22 @@ Full-duplex bidirectional streaming connects frontend callers and dispatchers di
 3. **Client-Side Resilient Reconnection**:
    - `BidirectionalService` singleton provides exponential backoff reconnects, heartbeat ping-pong tracking, and real-time status broadcasting to UI components (`CONNECTED`, `CONNECTING`, `DISCONNECTED`).
 
+---
+
+## 12. Native Audio Transcription with Gemini 3.5 & Multilingual Voice Auto-Detection
+
+### 12.1 Audio Transcription with `gemini-3.5-transcribe` (`server/audioTranscribeService.ts`, `src/services/audioRecorderService.ts`)
+- **Dedicated Cloud Transcription**: Uses the specialized `gemini-3.5-transcribe` model (`POST /api/audio/transcribe`) to transcribe raw microphone recordings (WebM/WAV) without requiring third-party browser STT extensions or pre-selected language locales.
+- **Microphone Integration**: HTML5 `MediaRecorder` captures 16kHz audio from caller microphones, encodes chunks to base64, and transcribes speech verbatim with zero loss of caller emotional urgency or background screams.
+
+### 12.2 Automatic Multilingual Voice Detection & Same-Language Spoken Response
+- **Autonomous Language Detection**: The cognitive intake model (`gemini-3.8-flash`) automatically identifies the caller's spoken language (Spanish, English, French, German, Vietnamese, Mandarin, Hindi, Arabic, Tagalog, Ukrainian, Japanese, etc.) from chaotic, non-linear speech.
+- **Strict Same-Language Response Guarantee**:
+  - `caller_response_same_language`: Delivered in the caller's exact detected native language using Aoede calming cadence and life-safety directives.
+  - `caller_response_english`: Parallel verbatim English translation for Computer-Aided Dispatch (CAD) operators and responding units.
+  - `caller_input_english_translation`: Complete translation of the caller's words into English for the incident record.
+  - `caller_language` & `caller_language_code`: Extracted 2-letter ISO code (e.g. `es`, `fr`, `de`, `ja`, `en`) controlling browser SpeechSynthesis voice selection.
+- **Voice Synthesis in Caller's Language**: `speakAura` maps the detected `caller_language_code` to the optimal browser TTS voice persona, ensuring AURA speaks aloud back to the caller in their native language.
+
+
 

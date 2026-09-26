@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { MemoryManager } from './server/memoryManager.ts';
 import { BidirectionalWsServer } from './server/bidirectionalWsServer.ts';
+import { transcribeAudioWithGemini } from './server/audioTranscribeService.ts';
 import {
   createSession,
   getSession,
@@ -129,7 +130,8 @@ function broadcastPostgresNotify(event: string, data: any) {
 
 async function createServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // Initialize MemoryManager for short-term SQLite session storage & 20K summarization
   const memoryManager = MemoryManager.getInstance(ai);
@@ -290,6 +292,31 @@ async function createServer() {
       res.json({ status: 'SUCCESS', result });
     } catch (err: any) {
       console.error('[SUMMARIZATION MIDDLEWARE API ERROR]', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Audio Transcription using gemini-3.5-transcribe
+  app.post('/api/audio/transcribe', async (req: Request, res: Response) => {
+    const { audio, audioBase64, mimeType = 'audio/webm' } = req.body;
+    const base64Data = audioBase64 || audio;
+    if (!base64Data) {
+      return res.status(400).json({ error: 'Audio data (audioBase64 or audio) is required.' });
+    }
+
+    try {
+      const result = await transcribeAudioWithGemini(ai, base64Data, mimeType);
+      if (!result.success) {
+        return res.status(500).json({ status: 'ERROR', error: result.error });
+      }
+      res.json({
+        status: 'SUCCESS',
+        model: result.model,
+        transcript: result.transcript,
+        mimeType: result.mimeType
+      });
+    } catch (err: any) {
+      console.error('[AUDIO TRANSCRIBE ROUTE ERROR]', err);
       res.status(500).json({ error: err.message });
     }
   });

@@ -16,6 +16,7 @@
 export interface AuraSystemConfig {
   aiModel: string;
   intakeAiModel: string;
+  transcribeAiModel: string;
   framework: string;
   defaultVoice: string;
   speechSynthesis: {
@@ -42,6 +43,7 @@ export interface AuraSystemConfig {
     sseDashboard: string;
     wsAudioBase: string;
     wsBidirectional: string;
+    audioTranscribe: string;
     recentIncidents: string;
     manualDispatch: string;
     chatIntake: string;
@@ -67,6 +69,7 @@ export interface AuraSystemConfig {
 export const AURA_CONFIG: AuraSystemConfig = {
   aiModel: "gemini-3.8-live",
   intakeAiModel: "gemini-3.8-flash",
+  transcribeAiModel: "gemini-3.5-transcribe",
   framework: "google-adk",
   defaultVoice: "Aoede",
   speechSynthesis: {
@@ -93,6 +96,7 @@ export const AURA_CONFIG: AuraSystemConfig = {
     sseDashboard: "/api/events/dashboard",
     wsAudioBase: "/ws/audio",
     wsBidirectional: "/ws/call",
+    audioTranscribe: "/api/audio/transcribe",
     recentIncidents: "/api/incidents",
     manualDispatch: "/api/dispatch",
     chatIntake: "/api/chat/intake",

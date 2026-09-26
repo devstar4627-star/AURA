@@ -71,6 +71,7 @@ import {
   SqlSummaryData
 } from "../services/sqlMemoryService";
 import { bidirectionalService } from "../services/bidirectionalService";
+import { audioRecorderService } from "../services/audioRecorderService";
 
 export interface InteractiveCallerSimulatorProps {
   onDispatchReportFired: (report: any) => void;
@@ -171,6 +172,11 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [wsStatus, setWsStatus] = useState<"CONNECTED" | "CONNECTING" | "DISCONNECTED" | "ERROR">("CONNECTING");
 
+  // Gemini 3.5 Audio Transcription & Recording State
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [recordingDurationMs, setRecordingDurationMs] = useState(0);
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+
   // Speech Recognition (Mic) State
   const [isMicListening, setIsMicListening] = useState(false);
   const [micLang, setMicLang] = useState("en-US");
@@ -207,6 +213,59 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
       unsubMsg();
     };
   }, []);
+
+  // Subscribe to AudioRecorderService state changes
+  useEffect(() => {
+    const unsub = audioRecorderService.onStateChange((state) => {
+      setIsRecordingAudio(state.isRecording);
+      setRecordingDurationMs(state.durationMs);
+    });
+    return () => {
+      unsub();
+      audioRecorderService.cancelRecording();
+    };
+  }, []);
+
+  /**
+   * Toggles native audio recording and transcribes via gemini-3.5-transcribe.
+   */
+  const handleToggleAudioRecording = async () => {
+    console.info(`[CALL SIMULATOR] handleToggleAudioRecording called (isRecordingAudio=${isRecordingAudio})`);
+    if (isRecordingAudio) {
+      console.info("[CALL SIMULATOR] Stopping audio recording and transcribing via gemini-3.5-transcribe...");
+      setIsTranscribingAudio(true);
+      try {
+        const blob = await audioRecorderService.stopRecording();
+        if (blob && blob.size > 0) {
+          const transcript = await audioRecorderService.transcribeBlob(blob);
+          setIsTranscribingAudio(false);
+          if (transcript.trim()) {
+            if (!isCallActive) handleStartCall();
+            handleCallerSendUtterance(transcript.trim());
+          } else {
+            setMicErrorNote("No speech detected in audio recording.");
+          }
+        } else {
+          setIsTranscribingAudio(false);
+        }
+      } catch (err: any) {
+        console.error("[CALL SIMULATOR ERROR] Audio transcription failed:", err);
+        setIsTranscribingAudio(false);
+        setMicErrorNote(`Audio transcription failed: ${err.message || err}`);
+      }
+    } else {
+      if (isAiSpeaking) {
+        handleBargeInCutoff();
+      }
+      if (!isCallActive) {
+        handleStartCall();
+      }
+      const started = await audioRecorderService.startRecording();
+      if (!started) {
+        setMicErrorNote("Microphone permission denied or MediaRecorder unsupported in this browser.");
+      }
+    }
+  };
 
   // Auto-scroll transcript feed
   useEffect(() => {
@@ -1093,6 +1152,41 @@ export const InteractiveCallerSimulator: React.FC<InteractiveCallerSimulatorProp
           >
             {isMicListening ? <MicOff className="w-4 h-4 text-white" /> : <Mic className="w-4 h-4 text-emerald-400" />}
             <span>{isMicListening ? "LISTENING (CLICK TO SEND)" : "MIC INTAKE"}</span>
+          </button>
+
+          {/* Dedicated Gemini 3.5 Audio Transcribe Button (Auto Voice & Language Detection) */}
+          <button
+            onClick={handleToggleAudioRecording}
+            disabled={isTranscribingAudio}
+            title={
+              isRecordingAudio
+                ? "Click to Stop & Transcribe with Gemini 3.5"
+                : "Record Voice with Microphone (Auto-detects language via gemini-3.5-transcribe)"
+            }
+            className={`px-3 py-2 rounded-xl border font-mono text-xs font-bold flex items-center justify-center gap-1.5 transition-all shrink-0 ${
+              isRecordingAudio
+                ? "bg-red-600 text-white border-red-400 animate-pulse shadow-lg shadow-red-950/60"
+                : isTranscribingAudio
+                ? "bg-purple-900/60 text-purple-300 border-purple-500/50"
+                : "bg-cyan-950/40 hover:bg-cyan-900/60 text-cyan-300 border-cyan-500/40"
+            }`}
+          >
+            {isTranscribingAudio ? (
+              <>
+                <Loader2 className="w-4 h-4 text-purple-400 animate-spin" />
+                <span>TRANSCRIBING (GEMINI 3.5)...</span>
+              </>
+            ) : isRecordingAudio ? (
+              <>
+                <Radio className="w-4 h-4 text-white animate-ping" />
+                <span>RECORDING ({Math.round(recordingDurationMs / 1000)}s) - CLICK TO SEND</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4 text-cyan-400" />
+                <span>RECORD VOICE (AUTO-DETECT)</span>
+              </>
+            )}
           </button>
 
           {/* Text Input Field */}

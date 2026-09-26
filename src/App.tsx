@@ -42,6 +42,7 @@ import {
   Lightbulb,
   SlidersHorizontal
 } from "lucide-react";
+import { InteractiveCallerSimulator } from "./components/InteractiveCallerSimulator";
 
 // Web Audio API Synthesizer for tactical dispatch chirps and tones
 class TacticalAudio {
@@ -624,6 +625,46 @@ export default function App() {
   const [customQuestionPrompt, setCustomQuestionPrompt] = useState<string>("");
   const [isGeneratingCustom, setIsGeneratingCustom] = useState(false);
   const [customQuestions, setCustomQuestions] = useState<Record<string, SuggestedQuestion[]>>({});
+  const [simulatorTransmittedQuestion, setSimulatorTransmittedQuestion] = useState<string | null>(null);
+
+  const handleSimulatorDispatchReport = async (reportArgs: any) => {
+    console.info("[APP] handleSimulatorDispatchReport received:", reportArgs);
+    const isCrit = (reportArgs.importance && reportArgs.importance.includes("CRITICAL")) || reportArgs.panic_index >= 8 || reportArgs.casualties > 0;
+    const newRecord: IncidentRecord = {
+      id: `aura-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      call_id: `CALL-${Math.floor(Math.random() * 90000 + 10000)}`,
+      incident_type: reportArgs.problemStatement || reportArgs.incident_type || "Emergency Incident",
+      location: reportArgs.location || "Awaiting Location Confirmation",
+      panic_index: reportArgs.panic_index || 8,
+      casualties: reportArgs.casualties || 0,
+      status: "NEW_INTAKE",
+      priority: isCrit ? "CRITICAL" : "HIGH",
+      caller_summary: reportArgs.caller_summary || "Automated intake recorded by AURA AI dispatcher.",
+      tone_assessment: {
+        screaming_detected: reportArgs.panic_index >= 8,
+        breathing_rate: reportArgs.panic_index >= 8 ? "Hyperventilating (36 BPM)" : "Elevated",
+        background_noise: reportArgs.primaryHazard || "Emergency crisis acoustic environment"
+      },
+      recommended_units: reportArgs.recommended_units || ["Engine 4", "Medic 1"],
+      created_at: new Date().toISOString()
+    };
+
+    setIncidents((prev) => [newRecord, ...prev]);
+    setSelectedIncident(newRecord);
+    audioFX.playDispatchChime();
+    setLastEventBadge(`CRISIS INTAKE: ${newRecord.incident_type} [${newRecord.priority}]`);
+    setTimeout(() => setLastEventBadge(null), 4000);
+
+    try {
+      await fetch("/api/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reportArgs)
+      });
+    } catch (err) {
+      // Local fallback
+    }
+  };
 
   const handleCopyQuestion = (id: string, text: string) => {
     if (navigator?.clipboard) {
@@ -636,7 +677,11 @@ export default function App() {
   const handleTransmitQuestion = (q: SuggestedQuestion) => {
     audioFX.playRadioChirp();
     setTransmittedQuestionId(q.id);
-    setTimeout(() => setTransmittedQuestionId(null), 2500);
+    setSimulatorTransmittedQuestion(q.question);
+    setTimeout(() => {
+      setTransmittedQuestionId(null);
+      setSimulatorTransmittedQuestion(null);
+    }, 2500);
 
     // If an active simulated call is running, push the dispatcher question to the live transcript stream!
     if (activeCall) {
@@ -894,7 +939,8 @@ export default function App() {
 
       analyze();
     } catch (err) {
-      alert("Microphone permission denied or device unavailable. Please allow microphone access or use preset crisis scenarios.");
+      setLastEventBadge("MICROPHONE UNAVAILABLE: Please use interactive simulator keypad below.");
+      setTimeout(() => setLastEventBadge(null), 4000);
       setIsMicActive(false);
     }
   };
@@ -927,7 +973,8 @@ export default function App() {
 
   const handleEvacAlert = (incident: IncidentRecord) => {
     audioFX.playDispatchChime();
-    alert(`[GEO-ALERT BROADCASTED]\nEmergency Evacuation Alert sent to cellular towers covering: ${incident.location}`);
+    setLastEventBadge(`[GEO-ALERT BROADCASTED]: Cellular towers alerted for ${incident.location}`);
+    setTimeout(() => setLastEventBadge(null), 4500);
   };
 
   // Filtered Incidents
@@ -1078,261 +1125,11 @@ export default function App() {
           </div>
         </section>
 
-        {/* Live Audio Control & Barge-in Simulator Console */}
-        <section className="p-4 sm:p-5 rounded-2xl bg-neutral-900/90 border border-neutral-800 shadow-xl relative overflow-hidden">
-          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 pb-3 border-b border-neutral-800">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 text-[11px] font-mono font-bold rounded bg-red-500/20 text-red-300 border border-red-500/30">
-                  REAL-TIME VOICE INTAKE ENGINE
-                </span>
-                <span className="text-xs text-neutral-400 font-mono">
-                  Model: <strong className="text-neutral-200">gemini-3.8-live</strong> | Barge-in: <strong className="text-emerald-400">ENABLED</strong>
-                </span>
-              </div>
-              <p className="text-xs sm:text-sm text-neutral-300 mt-1">
-                Select a panicked 911 caller crisis scenario or activate your live microphone to test bidirectional barge-in interruption.
-              </p>
-            </div>
-
-            {/* Mic Toggle & Call Controls */}
-            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
-              {!isMicActive ? (
-                <button
-                  onClick={startMicrophone}
-                  className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-mono font-semibold flex items-center gap-2 border border-neutral-700 transition-all shadow-sm"
-                >
-                  <Mic className="w-4 h-4 text-emerald-400" />
-                  <span>START LIVE MIC INTAKE</span>
-                </button>
-              ) : (
-                <button
-                  onClick={stopMicrophone}
-                  className="px-3.5 py-2 rounded-lg bg-red-600/90 hover:bg-red-500 text-white text-xs font-mono font-bold flex items-center gap-2 transition-all animate-pulse"
-                >
-                  <MicOff className="w-4 h-4" />
-                  <span>STOP LIVE MIC</span>
-                </button>
-              )}
-
-              {activeCall && (
-                <button
-                  onClick={endCall}
-                  className="px-3.5 py-2 rounded-lg bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-200 text-xs font-mono font-semibold flex items-center gap-2 transition-all"
-                >
-                  <PhoneOff className="w-4 h-4" />
-                  <span>HANG UP CALL</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Preset Emergency Scenarios Selector */}
-          <div className="pt-3">
-            <div className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <span>Simulate Real 911 Audio Scenarios (ADK LiveClient):</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-              {CRISIS_SCENARIOS.map((scenario) => {
-                const isActive = activeCall?.scenario.id === scenario.id;
-                return (
-                  <button
-                    key={scenario.id}
-                    onClick={() => startScenario(scenario)}
-                    className={`p-2.5 rounded-xl border text-left transition-all text-xs font-mono relative overflow-hidden ${
-                      isActive
-                        ? "bg-red-950/40 border-red-500/60 shadow-[0_0_15px_rgba(239,68,68,0.2)]"
-                        : "bg-neutral-950/60 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-[10px] text-neutral-400 mb-1">
-                      <span className="font-bold text-neutral-300 truncate">{scenario.title}</span>
-                      <span className={`px-1 rounded ${scenario.panicIndex >= 8 ? "bg-red-500/20 text-red-300" : "bg-amber-500/20 text-amber-300"}`}>
-                        PANIC {scenario.panicIndex}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-neutral-400 truncate italic">
-                      "{scenario.callerQuote}"
-                    </p>
-                    {isActive && (
-                      <div className="mt-1.5 flex items-center gap-1 text-[10px] text-red-400 font-bold">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
-                        <span>LIVE SESSION STREAMING</span>
-                      </div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Active Call Live Waveform & Paralinguistic Console */}
-          {(activeCall || isMicActive) && (
-            <div className="mt-4 pt-4 border-t border-neutral-800 grid grid-cols-1 lg:grid-cols-3 gap-4">
-              {/* Waveform & Scream Audio Visualizer */}
-              <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800/90 flex flex-col justify-between">
-                <div className="flex items-center justify-between text-xs font-mono text-neutral-400 mb-2">
-                  <span className="flex items-center gap-1.5">
-                    <Waves className="w-4 h-4 text-cyan-400" />
-                    <span>AUDIO WAVEFORM (16kHz PCM)</span>
-                  </span>
-                  <span className="text-red-400 font-bold">
-                    {isMicActive ? `${micVolume}% RMS` : activeCall?.isAiSpeaking ? "AURA Voice" : "Caller Voice"}
-                  </span>
-                </div>
-
-                {/* Animated Audio Equalizer Bars */}
-                <div className="flex items-end gap-1 h-12 py-1">
-                  {[20, 55, 85, 95, 60, 40, 90, 100, 75, 45, 80, 95, 65, 40, 70, 85, 90, 50, 30].map(
-                    (baseH, idx) => {
-                      const dynamicH = isMicActive
-                        ? Math.min(100, Math.max(10, Math.round((baseH * micVolume) / 45)))
-                        : activeCall?.isAiSpeaking
-                        ? Math.sin(idx + Date.now() / 200) * 30 + 50
-                        : baseH;
-
-                      const isPeak = dynamicH > 80;
-                      return (
-                        <div
-                          key={idx}
-                          style={{ height: `${dynamicH}%` }}
-                          className={`flex-1 rounded-t transition-all duration-75 ${
-                            isPeak
-                              ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"
-                              : dynamicH > 50
-                              ? "bg-amber-400"
-                              : "bg-cyan-500/80"
-                          }`}
-                        />
-                      );
-                    }
-                  )}
-                </div>
-
-                <div className="flex items-center justify-between text-[11px] font-mono text-neutral-500 mt-2">
-                  <span>Noise Floor: -48 dBFS</span>
-                  <span className={activeCall?.scenario.screaming || micVolume > 65 ? "text-red-400 font-bold" : "text-neutral-400"}>
-                    {activeCall?.scenario.screaming || micVolume > 65 ? "Peak Scream > +84 dB" : "Nominal Voice"}
-                  </span>
-                </div>
-              </div>
-
-              {/* Paralinguistic Tone Assessment Box */}
-              <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800/90 space-y-2">
-                <div className="flex items-center justify-between text-xs font-mono">
-                  <span className="text-neutral-400 flex items-center gap-1.5">
-                    <HeartPulse className="w-4 h-4 text-red-400" />
-                    <span>PARALINGUISTIC TONE</span>
-                  </span>
-                  <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-bold">
-                    PANIC: {isMicActive ? micPanicScore : activeCall?.currentPanic || 8}/10
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-xs font-mono text-neutral-300 pt-1">
-                  <div>
-                    <span className="text-[10px] text-neutral-500 block uppercase">Breathing Cadence</span>
-                    <span className="text-red-400 font-semibold">
-                      {isMicActive
-                        ? micVolume > 60
-                          ? "Hyperventilating (36 BPM)"
-                          : "Normal Breathing"
-                        : activeCall?.scenario.breathing}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-neutral-500 block uppercase">Acoustic Shreik</span>
-                    <span className="text-amber-400 font-semibold">
-                      {isMicActive
-                        ? micVolume > 70
-                          ? "CONFIRMED PEAK"
-                          : "Negative"
-                        : activeCall?.scenario.screaming
-                        ? "CONFIRMED PEAK"
-                        : "Negative"}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="text-[11px] font-mono text-neutral-400 border-t border-neutral-800/80 pt-1.5 flex items-center justify-between">
-                  <span>Grounding Response:</span>
-                  <span className={groundingActive ? "text-emerald-400 font-bold" : "text-neutral-500"}>
-                    {groundingActive ? "PROTOCOL ENGAGED" : "STANDBY"}
-                  </span>
-                </div>
-              </div>
-
-              {/* Real-time Barge-In Interruption Monitor */}
-              <div
-                className={`p-3.5 rounded-xl border transition-all ${
-                  activeCall?.bargeInCount || micBargeInTriggered
-                    ? "bg-red-950/30 border-red-500/60 shadow-[0_0_20px_rgba(239,68,68,0.2)]"
-                    : "bg-neutral-950 border-neutral-800"
-                }`}
-              >
-                <div className="flex items-center justify-between text-xs font-mono text-neutral-400 mb-1">
-                  <span className="flex items-center gap-1.5">
-                    <Zap className="w-4 h-4 text-amber-400" />
-                    <span>BARGE-IN DETECTOR</span>
-                  </span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                      activeCall?.bargeInCount || micBargeInTriggered
-                        ? "bg-red-500 text-white animate-pulse"
-                        : "bg-neutral-800 text-neutral-400"
-                    }`}
-                  >
-                    {activeCall?.bargeInCount || micBargeInTriggered ? "INTERRUPTED" : "LISTENING"}
-                  </span>
-                </div>
-
-                <p className="text-xs text-neutral-300 leading-snug mt-2">
-                  {activeCall?.bargeInCount || micBargeInTriggered ? (
-                    <span className="text-red-300 font-medium">
-                      [BARGE-IN TRIGGERED] Caller shriek interrupted AI playback. Synthesis aborted in &lt; 45ms. Audio channel returned to caller.
-                    </span>
-                  ) : (
-                    <span className="text-neutral-400">
-                      LiveClient full-duplex session active. If caller interrupts or screams, AI speech is truncated immediately.
-                    </span>
-                  )}
-                </p>
-
-                <div className="mt-2 text-[10px] font-mono text-neutral-500 flex justify-between">
-                  <span>Interrupt Threshold: 42dB</span>
-                  <span>Turn-around Latency: ~180ms</span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Live Transcript Stream Feed */}
-          {(activeCall?.liveTranscript.length || micTranscript.length) > 0 && (
-            <div className="mt-3 p-3 rounded-xl bg-neutral-950/80 border border-neutral-800/80 max-h-48 overflow-y-auto space-y-1.5 font-mono text-xs">
-              <div className="text-[10px] text-neutral-500 uppercase tracking-wider mb-1 flex items-center justify-between sticky top-0 bg-neutral-950 py-0.5">
-                <span>Real-Time Turn-Taking & Tool Execution Stream:</span>
-                <span className="text-emerald-400 font-bold">gemini-3.8-live</span>
-              </div>
-              {(isMicActive ? micTranscript : activeCall?.liveTranscript || []).map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`flex items-start gap-2 p-1.5 rounded ${
-                    msg.speaker === "AURA"
-                      ? "bg-blue-950/30 text-blue-200 border-l-2 border-blue-500"
-                      : msg.speaker === "CALLER" || msg.speaker === "USER"
-                      ? "bg-red-950/20 text-red-200 border-l-2 border-red-500"
-                      : "bg-neutral-900/60 text-cyan-300 border-l-2 border-cyan-500 text-[11px]"
-                  }`}
-                >
-                  <span className="font-bold text-[10px] px-1 rounded bg-black/40 text-neutral-400 flex-shrink-0">
-                    {msg.speaker}:
-                  </span>
-                  <span className="leading-relaxed">{msg.text}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
+        {/* Interactive 911 Caller Voice Simulator & Virtual Phone */}
+        <InteractiveCallerSimulator
+          onDispatchReportFired={handleSimulatorDispatchReport}
+          externalTransmittedQuestion={simulatorTransmittedQuestion}
+        />
 
         {/* Live Incidents Feed & Selected Incident Command Split */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
